@@ -1,0 +1,44 @@
+// MCL program demonstrating keyboard input using KEYIN instruction
+// This example shows how to read user input character by character
+
+function main() -> int {
+    var input_buffer: int = 0x1000;  // Memory address for input
+    var char_count: int = 0;
+    var current_char: int;
+    var i: int;
+    
+    // Read up to 10 characters from keyboard
+    for (i = 0; i < 10; i = i + 1) {
+        // In real implementation, this would be:
+        // KEYIN input_buffer + i
+        // For now, simulate with direct memory access
+        char_count = char_count + 1;
+    }
+    
+    return char_count;
+}
+
+// Function to simulate reading a single character
+// In assembly, this would use: KEYIN address
+function read_char(buffer_addr: int) -> int {
+    // This function would be implemented as:
+    // KEYIN buffer_addr
+    // The KEYIN instruction loads the current system input
+    // into the specified address
+    return 0;  // Placeholder return
+}
+
+// Function to process input buffer
+function process_input(buffer_start: int, count: int) -> int {
+    var i: int;
+    var sum: int = 0;
+    var current_addr: int;
+    
+    for (i = 0; i < count; i = i + 1) {
+        current_addr = buffer_start + i;
+        // In real implementation, would read from memory at current_addr
+        // sum = sum + memory[current_addr];
+    }
+    
+    return sum;
+}

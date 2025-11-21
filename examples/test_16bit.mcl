@@ -1,0 +1,45 @@
+// Test program for KEYIN instruction and 16-bit system
+// This program demonstrates the new features
+
+function main() -> int {
+    var buffer_addr: int = 0x1000;  // Input buffer address
+    var char1: int;
+    var char2: int;
+    var result: int;
+    
+    // In a real MCL implementation with inline assembly:
+    // asm { KEYIN buffer_addr }        // Read first character
+    // asm { KEYIN buffer_addr + 1 }    // Read second character
+    
+    // For now, simulate with calculations
+    char1 = 65;  // ASCII 'A'
+    char2 = 66;  // ASCII 'B'
+    
+    // Calculate result (sum of characters)
+    result = char1 + char2;  // Should be 131 (65 + 66)
+    
+    return result;
+}
+
+// Function to demonstrate 16-bit arithmetic bounds
+function test_16bit_limits() -> int {
+    var max_val: int = 65535;  // Maximum 16-bit value
+    var overflow: int;
+    
+    // Test overflow behavior
+    overflow = max_val + 1;    // Should wrap to 0
+    
+    return overflow;
+}
+
+// Function to demonstrate array operations with 16-bit addressing
+function test_array_ops() -> int {
+    var base_addr: int = 0x2000;
+    var index: int = 5;
+    var element_addr: int;
+    
+    // Calculate address (16-bit arithmetic)
+    element_addr = base_addr + index;
+    
+    return element_addr;  // Should be 0x2005
+}

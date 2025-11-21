@@ -1,0 +1,50 @@
+// Simple calculator using switch statement
+
+function calculate(op: char, a: int, b: int) -> int {
+    switch (op) {
+        case '+': {
+            return a + b;
+        }
+        case '-': {
+            return a - b;
+        }
+        case '*': {
+            return a * b;
+        }
+        case '/': {
+            if (b != 0) {
+                return a / b;
+            }
+            return 0;  // Division by zero
+        }
+        default: {
+            return 0;  // Unknown operator
+        }
+    }
+}
+
+function main() -> int {
+    var result1: int = calculate('+', 10, 5);  // Should be 15
+    var result2: int = calculate('*', 4, 7);   // Should be 28
+    var result3: int = calculate('/', 20, 4);  // Should be 5
+    
+    return result1 + result2 + result3;  // Should be 48
+}
+
+function factorial(n: int) -> int {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+function power(base: int, exp: int) -> int {
+    var result: int = 1;
+    var i: int;
+    
+    for (i = 0; i < exp; i = i + 1) {
+        result = result * base;
+    }
+    
+    return result;
+}

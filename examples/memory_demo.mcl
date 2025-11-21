@@ -1,0 +1,38 @@
+// Memory management demonstration program
+function main() {
+    // Allocate memory for different use cases
+    int* small_buffer = malloc(4);
+    int* medium_buffer = malloc(16);
+    int* large_buffer = malloc(100);
+    
+    // Use the memory
+    *small_buffer = 42;
+    int value = *small_buffer;
+    
+    // Pointer arithmetic and dereferences
+    int* ptr = malloc(8);
+    *ptr = 10;
+    ptr = ptr + 1;
+    *ptr = 20;
+    
+    // Clean up memory
+    free(small_buffer);
+    free(medium_buffer);
+    free(large_buffer);
+    free(ptr - 1);  // Free the original allocation
+    
+    // Test else-if chains with memory operations
+    int* conditional_ptr;
+    int size = 10;
+    
+    if (size < 5) {
+        conditional_ptr = malloc(4);
+    } else if (size < 20) {
+        conditional_ptr = malloc(16);
+    } else {
+        conditional_ptr = malloc(64);
+    }
+    
+    *conditional_ptr = size * 2;
+    free(conditional_ptr);
+}

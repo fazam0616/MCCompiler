@@ -1,0 +1,29 @@
+// Hello World program in MCL
+// Demonstrates basic syntax and function declaration
+
+function main() -> int {
+    var message: int = 72;  // ASCII 'H'
+    var i: int;
+    var input_char: int;
+    
+    // Simple loop to "print" hello (in reality just manipulate registers)
+    for (i = 0; i < 5; i = i + 1) {
+        message = message + i;
+    }
+    
+    // Example of reading input (would need inline assembly or builtin)
+    // input_char = read_keyboard(); // This would use KEYIN instruction
+    
+    return message;
+}
+
+function add_numbers(a: int, b: int) -> int {
+    return a + b;
+}
+
+function fibonacci(n: int) -> int {
+    if (n <= 1) {
+        return n;
+    }
+    return fibonacci(n - 1) + fibonacci(n - 2);
+}

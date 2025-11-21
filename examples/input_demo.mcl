@@ -1,0 +1,31 @@
+// MCL program demonstrating the KEYIN instruction
+// This shows how keyboard input works in the 16-bit system
+
+function main() -> int {
+    var input_address: int = 0x1000;  // Memory location for input
+    var result: int = 0;
+    
+    // Simulate reading a character using KEYIN
+    // Note: This would be inline assembly in a real implementation
+    // KEYIN input_address
+    
+    // For now, just return a success value
+    result = 42;  // ASCII for '*'
+    
+    return result;
+}
+
+// Function to demonstrate buffer processing  
+function read_multiple_chars(buffer_addr: int, count: int) -> int {
+    var i: int;
+    var total: int = 0;
+    
+    // In a real implementation, this would use:
+    for (i = 0; i < count; i = i + 1) {
+        // KEYIN (buffer_addr + i)
+        // total = total + memory[buffer_addr + i];
+        total = total + 1;  // Placeholder
+    }
+    
+    return total;
+}

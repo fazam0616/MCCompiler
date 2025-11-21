@@ -1,0 +1,42 @@
+// MCL program demonstrating arrays and pointers
+
+function main() -> int {
+    var numbers: int[10];
+    var i: int;
+    var sum: int = 0;
+    var ptr: *int;
+    
+    // Initialize array
+    for (i = 0; i < 10; i = i + 1) {
+        numbers[i] = i * 2;
+    }
+    
+    // Sum array elements using pointer arithmetic
+    ptr = &numbers;
+    for (i = 0; i < 10; i = i + 1) {
+        sum = sum + *ptr;
+        ptr = ptr + 1;  // Move pointer to next element
+    }
+    
+    return sum;
+}
+
+function swap(a: *int, b: *int) {
+    var temp: int = *a;
+    *a = *b;
+    *b = temp;
+}
+
+function sort_array(arr: *int, size: int) {
+    var i: int;
+    var j: int;
+    
+    // Simple bubble sort
+    for (i = 0; i < size - 1; i = i + 1) {
+        for (j = 0; j < size - i - 1; j = j + 1) {
+            if (arr[j] > arr[j + 1]) {
+                swap(&arr[j], &arr[j + 1]);
+            }
+        }
+    }
+}
