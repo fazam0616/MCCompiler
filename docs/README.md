@@ -2,7 +2,7 @@
 
 ## What is MCL?
 
-MCL (Minecraft Computer Language) is a simple, C-like programming language designed for educational purposes. It compiles to a custom assembly language that runs on a simulated virtual machine with graphics capabilities.
+MCL (Minecraft Computer Language) is a simple, C-like programming language designed for a 16 bit computer, implemented in Minecraft. It compiles to a custom assembly language that runs on a simulated virtual machine with graphics capabilities.
 
 ## Your First MCL Program
 

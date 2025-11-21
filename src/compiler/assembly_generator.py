@@ -164,7 +164,6 @@ class AssemblyGenerator(ASTVisitor):
         self.emit(InstructionType.MVR, 0, 0, label=f"func_{node.name}", 
                  comment=f"Function: {node.name}")
 
-        # Enter function scope
         self.symbol_table.enter_scope()
 
         # Reset parameter register allocation for each function
@@ -177,12 +176,10 @@ class AssemblyGenerator(ASTVisitor):
 
         # Define user parameters
         for param in node.parameters:
-            symbol = self.symbol_table.define_parameter(param.name, param.param_type)
+            _ = self.symbol_table.define_parameter(param.name, param.param_type)
 
-        # Generate function body
         node.body.accept(self)
 
-        # Exit function scope
         self.symbol_table.exit_scope()
 
         # Default return (return 0)
@@ -537,7 +534,6 @@ class AssemblyGenerator(ASTVisitor):
 
         if node.operator == UnaryOperator.NEGATE:
             temp_reg = self.symbol_table.allocate_temporary()
-            self.symbol_table.create_temp_symbol(temp_reg)
             self.emit_immediate(InstructionType.MVR, 0, temp_reg, comment="Load 0 for negation")
             self.emit(InstructionType.SUB, temp_reg, operand_reg, comment="Negate")
             self.symbol_table.exit_expression_scope()
@@ -566,7 +562,6 @@ class AssemblyGenerator(ASTVisitor):
                 symbol = self.symbol_table.resolve(symbol_name)
                 if symbol:
                     result_reg = self.symbol_table.allocate_temporary()
-                    self.symbol_table.create_temp_symbol(result_reg)
                     self.emit_immediate(InstructionType.MVR, symbol.address, result_reg, comment=f"Address of {symbol_name}")
                     self.symbol_table.exit_expression_scope()
                     return result_reg
@@ -574,7 +569,6 @@ class AssemblyGenerator(ASTVisitor):
             raise CodeGenerationError("Cannot take address of expression")
         elif node.operator == UnaryOperator.DEREFERENCE:
             result_reg = self.symbol_table.allocate_temporary()
-            self.symbol_table.create_temp_symbol(result_reg)
             self.emit(InstructionType.READ, operand_reg, result_reg, comment="Dereference")
             self.symbol_table.exit_expression_scope()
             return result_reg

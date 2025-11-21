@@ -163,7 +163,6 @@ class MemoryManager:
     
     def allocate_memory(self, symbol_name: str, size: int) -> Optional[int]:
         """Allocate memory for a symbol and return start address."""
-        # Find suitable segment (first-fit within size class, best-fit across sizes)
         segment = self._find_suitable_segment(size)
         if not segment:
             return None
@@ -171,7 +170,6 @@ class MemoryManager:
         # Remove from free lists
         self._remove_from_bucket(segment)
         
-        # If segment is larger than needed, split it
         if segment.size > size:
             self._split_segment(segment, size)
         
@@ -195,7 +193,6 @@ class MemoryManager:
         # Coalesce with neighbors
         coalesced_segment = self._coalesce_segment(segment)
         
-        # Add back to free lists
         self._add_to_bucket(coalesced_segment)
         
         return True
@@ -204,7 +201,6 @@ class MemoryManager:
         """Find a segment of suitable size using exponential bucket search."""
         target_bucket = self._get_size_bucket(size)
         
-        # First, look in the target bucket for best-fit
         best_segment = self._find_best_fit_in_bucket(target_bucket, size)
         if best_segment:
             return best_segment
@@ -213,7 +209,6 @@ class MemoryManager:
         for bucket_id in range(target_bucket + 1, len(self.size_buckets)):
             segments = self.bucket_to_segments[bucket_id]
             if segments:
-                # Find the smallest suitable segment in this bucket
                 best_segment = self._find_best_fit_in_bucket(bucket_id, size)
                 if best_segment:
                     return best_segment
@@ -535,11 +530,6 @@ class SymbolTable:
         # Also exit the register allocation scope
         self.register_allocator.exit_register_scope()
     
-    def create_temp_symbol(self, register: int) -> None:
-        """Create a temporary symbol for a register (for expression scope tracking)."""
-        # This is handled automatically by allocate_temporary now
-        pass
-    
     def get_memory_stats(self) -> Dict[str, any]:
         """Get comprehensive memory usage statistics."""
         return {
@@ -576,7 +566,6 @@ class RegisterAllocator:
         # Parameter register allocation (counting up from R2)
         self.next_param_register = 2
         
-        # NEW: Stack-based register availability tracking
         # Each scope has a set of available registers
         self.register_availability_stack = []
         
@@ -584,7 +573,6 @@ class RegisterAllocator:
         initial_available = set(range(self.PARAM_START, self.MAX_REGISTERS)) - self.ALU_REGISTERS
         self.register_availability_stack.append(initial_available)
         
-        # NEW: Register liveness tracking for optimization
         # Maps register -> scope depth where it was allocated
         self.register_scope_depth = {}
         
@@ -682,10 +670,8 @@ class RegisterAllocator:
             del self.symbol_to_register[symbol]
             del self.register_usage_count[register]
         
-        # Mark register as available in current scope
         self.mark_register_available(register)
         
-        # Clear liveness tracking
         self.mark_register_consumed(register)
         
         # Remove scope depth tracking
@@ -707,7 +693,6 @@ class RegisterAllocator:
                 raise RuntimeError(f"Cannot allocate register for spilled symbol {symbol_name}")
 
             ram_addr = self.spilled_symbols[symbol_name]
-            # Emit READ instruction: READ ram_addr, reg
             if hasattr(self, '_emit_callback') and self._emit_callback:
                 self._emit_callback('READ', ram_addr, reg, comment=f"Reload {symbol_name} from RAM")
 
@@ -727,9 +712,9 @@ class RegisterAllocator:
 
         reg = self.symbol_to_register[symbol_name]
 
-        # Check if register is live - if so, we need to be careful
-        if self.is_register_live(reg):
-            pass  # Warning: Spilling a live register
+        # # Check if register is live
+        # if self.is_register_live(reg):
+        #     pass 
 
         # Allocate RAM for spilled symbol
         ram_addr = self.memory_manager.allocate_memory(f"spill_{symbol_name}", 1)
@@ -805,7 +790,6 @@ class RegisterAllocator:
                     lru_reg = reg
         
         # Second pass: if no non-live registers, allow spilling live registers
-        # (This is a last resort)
         if lru_reg is None:
             for reg in register_pool:
                 if reg in self.register_to_symbol and reg not in self.ALU_REGISTERS:
@@ -817,15 +801,12 @@ class RegisterAllocator:
         if lru_reg is None:
             return None
         
-        # Spill the LRU symbol
         lru_symbol = self.register_to_symbol[lru_reg]
         if not self.spill_symbol(lru_symbol):
             return None
         
-        # Allocate the freed register
         self._assign_register_to_symbol(lru_reg, symbol_name)
         
-        # Mark as used in current scope
         self.mark_register_used(lru_reg)
         
         # Track scope depth
@@ -859,15 +840,12 @@ class RegisterAllocator:
         if not self.spill_symbol(lru_symbol):
             return None
         
-        # Create temporary symbol
         temp_name = f"__temp_{self.temp_register_counter}"
         self.temp_register_counter += 1
         
-        # Allocate the freed register
         self._assign_register_to_symbol(lru_reg, temp_name)
         self.temporary_registers.add(lru_reg)
         
-        # Mark as used in current scope
         self.mark_register_used(lru_reg)
         
         # Track scope depth
@@ -918,6 +896,7 @@ class RegisterAllocator:
             # Check if this symbol should be cleaned up
             # For now, we keep spilled symbols across scopes for safety
             # TODO: Track which scope each symbol was spilled in for more aggressive cleanup
+            print('TODO: Skipping spilled symbol cleanup for', symbol_name, 'at address', ram_addr)
             pass
         
         # Pop the scope
