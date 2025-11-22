@@ -145,13 +145,11 @@ class Parser:
                 base_type = IntType()  # For now, char is just int (ASCII)
             elif type_name == "void":
                 base_type = VoidType()
-            else:
-                self.error(f"Unknown type: {type_name}")
-            
+
             # Check for pointer type (type* syntax)
             if self.match(TokenType.ASTERISK):
                 return PointerType(base_type)
-            
+
             # Check for array type
             if self.match(TokenType.LEFT_BRACKET):
                 if self.check(TokenType.INTEGER):

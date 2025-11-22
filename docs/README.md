@@ -38,7 +38,7 @@ python src/vm/virtual_machine.py --file my_first_program.asm
 
 MCL supports:
 - **Variable Declarations**: Both `var name: type` and C-style `type name` syntax
-- **Data Types**: `int`, `char`, `void`, pointers (`*type`), arrays (`type[size]`)
+- **Data Types**: `int`, `char`, `void`, pointers (`type*`), arrays (`type[size]`)
 - **Operators**: 
   - Arithmetic: `+`, `-`, `*`, `/`, `%`
   - Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
@@ -143,7 +143,7 @@ function factorial(n: int) {
 function array_example() {
     var numbers: int[5];
     var i: int;
-    var ptr: *int;
+    var ptr: int*;
     
     // Initialize array
     for (i = 0; i < 5; i = i + 1) {
@@ -305,7 +305,7 @@ python src/debugger/main.py program.asm
 ### Finding Maximum in Array
 
 ```mcl
-function find_max(arr: *int, size: int) {
+function find_max(arr: int*, size: int) {
     var max: int = arr[0];
     var i: int;
     
@@ -322,7 +322,7 @@ function find_max(arr: *int, size: int) {
 ### Bubble Sort
 
 ```mcl
-function bubble_sort(arr: *int, size: int) {
+function bubble_sort(arr: int*, size: int) {
     var i: int;
     var j: int;
     var temp: int;
@@ -343,7 +343,7 @@ function bubble_sort(arr: *int, size: int) {
 ### Binary Search
 
 ```mcl
-function binary_search(arr: *int, size: int, target: int) {
+function binary_search(arr: int*, size: int, target: int) {
     var left: int = 0;
     var right: int = size - 1;
     var mid: int;

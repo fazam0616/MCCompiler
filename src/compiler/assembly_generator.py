@@ -561,12 +561,25 @@ class AssemblyGenerator(ASTVisitor):
             if symbol_name:
                 symbol = self.symbol_table.resolve(symbol_name)
                 if symbol:
+                    # If symbol is in register, move it to RAM
+                    if symbol.storage_location == StorageLocation.REGISTER:
+                        # Allocate RAM for the symbol
+                        ram_addr = self.symbol_table.memory_manager.allocate_memory(symbol.name, symbol.size)
+                        # Move value from register to RAM
+                        self.emit(InstructionType.LOAD, symbol.address, Operand(ram_addr, True), comment=f"Move {symbol_name} from R{symbol.address} to RAM (immediate address)")
+                        # Free the old register
+                        self.symbol_table.register_allocator.free_register(symbol.address)
+                        # Update symbol to reference RAM
+                        symbol.storage_location = StorageLocation.RAM
+                        symbol.address = ram_addr
                     result_reg = self.symbol_table.allocate_temporary()
                     self.emit_immediate(InstructionType.MVR, symbol.address, result_reg, comment=f"Address of {symbol_name}")
                     self.symbol_table.exit_expression_scope()
                     return result_reg
+            # If not a simple variable, evaluate the operand and return its register (address)
+            addr_reg = node.operand.accept(self)
             self.symbol_table.exit_expression_scope()
-            raise CodeGenerationError("Cannot take address of expression")
+            return addr_reg
         elif node.operator == UnaryOperator.DEREFERENCE:
             result_reg = self.symbol_table.allocate_temporary()
             self.emit(InstructionType.READ, operand_reg, result_reg, comment="Dereference")
@@ -585,30 +598,38 @@ class AssemblyGenerator(ASTVisitor):
             symbol = self.symbol_table.resolve(node.target.name)
             if not symbol:
                 raise CodeGenerationError(f"Undefined variable: {node.target.name}")
-            
             # Get current storage location for the symbol
             target_reg = self.symbol_table.access_symbol(node.target.name)
-            
             if symbol.storage_location == StorageLocation.RAM:
-                self.emit(InstructionType.LOAD, value_reg, symbol.address, 
+                # Use immediate for RAM address
+                self.emit(InstructionType.LOAD, value_reg, Operand(symbol.address, True),
                          comment=f"Assign to {node.target.name} (RAM)")
             else:
-                self.emit(InstructionType.MVR, value_reg, target_reg, 
+                self.emit(InstructionType.MVR, value_reg, target_reg,
                          comment=f"Assign to {node.target.name} (R{target_reg})")
-            
             return target_reg
         elif isinstance(node.target, ArrayAccess):
-            # Array assignment - simplified
-            base_reg = node.target.array.accept(self)
-            index_reg = node.target.index.accept(self)
-            
-            # Calculate address (base + index)
+            # Array assignment
+            array_node = node.target.array
+            index_node = node.target.index
+            # If array_node is an Identifier, get its symbol and RAM address
+            if isinstance(array_node, Identifier):
+                symbol = self.symbol_table.resolve(array_node.name)
+                if symbol and symbol.storage_location == StorageLocation.RAM:
+                    index_reg = index_node.accept(self)
+                    addr_reg = self.symbol_table.allocate_temporary()
+                    self.emit_immediate(InstructionType.MVR, symbol.address, addr_reg, comment=f"Base address of {array_node.name}")
+                    self.emit(InstructionType.ADD, addr_reg, index_reg, comment="Calculate array address")
+                    # Store value
+                    self.emit(InstructionType.LOAD, value_reg, 0, comment="Array assignment")
+                    return value_reg
+            # Fallback: treat as pointer arithmetic
+            base_reg = array_node.accept(self)
+            index_reg = index_node.accept(self)
             addr_reg = self.symbol_table.allocate_temporary()
-            self.emit(InstructionType.ADD, base_reg, index_reg, comment="Calculate array address")
-            self.emit(InstructionType.MVR, 0, addr_reg)  # Move ALU result to addr_reg
-            
-            # Store value
-            self.emit(InstructionType.LOAD, value_reg, addr_reg, comment="Array assignment")
+            self.emit(InstructionType.ADD, base_reg, index_reg, comment="Calculate array address (fallback)")
+            self.emit(InstructionType.MVR, 0, addr_reg)
+            self.emit(InstructionType.LOAD, value_reg, addr_reg, comment="Array assignment (fallback)")
             return value_reg
         elif isinstance(node.target, UnaryExpression) and node.target.operator == UnaryOperator.DEREFERENCE:
             # Pointer dereference assignment: *ptr = value
@@ -796,16 +817,25 @@ class AssemblyGenerator(ASTVisitor):
     
     def visit_array_access(self, node: ArrayAccess) -> int:
         """Generate code for array access."""
-        base_reg = node.array.accept(self)
-        index_reg = node.index.accept(self)
-        
-        # Calculate address (base + index)
-        self.emit(InstructionType.ADD, base_reg, index_reg, comment="Array index calculation")
-        
-        # Load value from calculated address (ALU result in R0)
+        array_node = node.array
+        index_node = node.index
+        # If array_node is an Identifier, get its symbol and RAM address
+        if isinstance(array_node, Identifier):
+            symbol = self.symbol_table.resolve(array_node.name)
+            if symbol and symbol.storage_location == StorageLocation.RAM:
+                index_reg = index_node.accept(self)
+                addr_reg = self.symbol_table.allocate_temporary()
+                self.emit_immediate(InstructionType.MVR, symbol.address, addr_reg, comment=f"Base address of {array_node.name}")
+                self.emit(InstructionType.ADD, addr_reg, index_reg, comment="Calculate array address")
+                result_reg = self.symbol_table.allocate_temporary()
+                self.emit(InstructionType.READ, 0, result_reg, comment="Load array element")
+                return result_reg
+        # Fallback: treat as pointer arithmetic
+        base_reg = array_node.accept(self)
+        index_reg = index_node.accept(self)
+        self.emit(InstructionType.ADD, base_reg, index_reg, comment="Array index calculation (fallback)")
         result_reg = self.symbol_table.allocate_temporary()
-        self.emit(InstructionType.READ, 0, result_reg, comment="Load array element")
-        
+        self.emit(InstructionType.READ, 0, result_reg, comment="Load array element (fallback)")
         return result_reg
     
     def visit_integer_literal(self, node: IntegerLiteral) -> int:
@@ -832,15 +862,15 @@ class AssemblyGenerator(ASTVisitor):
         if symbol.kind == SymbolKind.FUNCTION:
             # Return function address for function pointers
             result_reg = self.symbol_table.allocate_temporary()
-            self.emit_immediate(InstructionType.MVR, f"func_{node.name}", result_reg, 
+            self.emit_immediate(InstructionType.MVR, f"func_{node.name}", result_reg,
                                comment=f"Function pointer {node.name}")
             return result_reg
         else:
             # Variable or parameter - use symbol table to access
             if symbol.storage_location == StorageLocation.RAM:
-                # Load from RAM
+                # Load from RAM using immediate address
                 result_reg = self.symbol_table.allocate_temporary()
-                self.emit(InstructionType.READ, symbol.address, result_reg, 
+                self.emit(InstructionType.READ, Operand(symbol.address, True), result_reg,
                          comment=f"Load {node.name} from RAM")
                 return result_reg
             else:
