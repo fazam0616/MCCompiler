@@ -13,6 +13,7 @@ class TokenType(Enum):
     # Literals
     INTEGER = auto()
     CHAR = auto()
+    STRING = auto()
     IDENTIFIER = auto()
     
     # Keywords
@@ -48,6 +49,9 @@ class TokenType(Enum):
     # Memory management functions
     MALLOC = auto()
     FREE = auto()
+    READCHAR = auto()
+
+    ASM = auto()
     
     # Operators
     PLUS = auto()
@@ -146,6 +150,8 @@ class Lexer:
         # Memory management functions
         'malloc': TokenType.MALLOC,
         'free': TokenType.FREE,
+    'readChar': TokenType.READCHAR,
+    'asm': TokenType.ASM,
     }
     
     OPERATORS = {
@@ -292,6 +298,37 @@ class Lexer:
         
         self.advance()  # consume closing quote
         return Token(TokenType.CHAR, value, start_pos[0], start_pos[1])
+
+    def read_string_literal(self) -> Token:
+        """Read a double-quoted string literal."""
+        start_pos = (self.line, self.column)
+        self.advance()  # consume opening quote
+
+        value = ""
+        while self.peek() is not None and self.peek() != '"':
+            if self.peek() == '\\':
+                self.advance()
+                if not self.peek():
+                    self.error("Unterminated escape sequence in string")
+                esc = self.advance()
+                escape_map = {
+                    'n': '\n',
+                    't': '\t',
+                    'r': '\r',
+                    '\\': '\\',
+                    '"': '"',
+                    '\'': "'",
+                    '0': '\0'
+                }
+                value += escape_map.get(esc, esc)
+            else:
+                value += self.advance()
+
+        if self.peek() != '"':
+            self.error("Unterminated string literal")
+
+        self.advance()  # consume closing quote
+        return Token(TokenType.STRING, value, start_pos[0], start_pos[1])
     
     def read_comment(self) -> Token:
         """Read a single-line comment."""
@@ -337,6 +374,10 @@ class Lexer:
             # Character literals
             if char == '\'':
                 self.tokens.append(self.read_char_literal())
+                continue
+            # String literals
+            if char == '"':
+                self.tokens.append(self.read_string_literal())
                 continue
             
             # Comments

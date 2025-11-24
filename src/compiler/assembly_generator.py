@@ -87,7 +87,20 @@ class Instruction:
                 result += " " + ", ".join(str(op) for op in self.operands)
 
         if self.comment:
-            result += f"  // {self.comment}"
+            # Special-case raw assembly emission: comment starts with RAW_ASM:
+            if isinstance(self.comment, str) and self.comment.startswith('RAW_ASM:'):
+                # Emit the raw assembly line after the marker
+                raw = self.comment[len('RAW_ASM:'):]
+                # If nothing else on the line, return raw as-is
+                if not self.opcode and not self.label:
+                    return raw
+                # If it's a label-only raw line and label matches, emit label only
+                if self.label and raw == f"{self.label}:":
+                    return f"{self.label}:"
+                # Otherwise append as comment
+                result += f"  // {raw}"
+            else:
+                result += f"  // {self.comment}"
         
         return result
 
@@ -835,6 +848,27 @@ class AssemblyGenerator(ASTVisitor):
             # The runtime code doesn't need to do anything since memory layout is predetermined
             
             return 0  # free returns void
+        elif node.function_name == "readChar":
+            # readChar() - read a single character from input using KEYIN
+            if len(node.arguments) != 0:
+                raise CodeGenerationError("readChar takes no arguments")
+
+            # Allocate one byte in RAM to receive KEYIN
+            temp_symbol_name = f"readchar_temp_{self.label_counter}"
+            self.label_counter += 1
+
+            ram_addr = self.symbol_table.memory_manager.allocate_memory(temp_symbol_name, 1)
+            if ram_addr is None:
+                raise CodeGenerationError("Failed to allocate memory for readChar buffer")
+
+            # Emit KEYIN ram_addr
+            # KEYIN expects an address operand; use immediate address
+            self.emit(InstructionType.KEYIN, Operand(ram_addr, True), comment=f"KEYIN -> {ram_addr}")
+
+            # Read the value from RAM into a register and return it
+            result_reg = self.symbol_table.allocate_temporary()
+            self.emit(InstructionType.READ, Operand(ram_addr, True), result_reg, comment="Read char into register")
+            return result_reg
         
         else:
             raise CodeGenerationError(f"Unknown memory function: {node.function_name}")
@@ -884,6 +918,35 @@ class AssemblyGenerator(ASTVisitor):
         self.emit_immediate(InstructionType.MVR, node.value, result_reg, 
                            comment=f"Load literal {node.value}")
         return result_reg
+
+    def visit_asm_function_call(self, node: 'AsmFunctionCall') -> int:
+        """Inject raw assembly from asm("...") into the output.
+
+        The asm text is a string with one or more lines. Each non-empty
+        non-comment line is emitted verbatim into the generated assembly.
+        The asm() expression evaluates to the value in register 0.
+        """
+        asm_text = node.asm_text
+        # Split into lines and emit raw assembly lines
+        for raw_line in asm_text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            # Preserve comments (lines starting with //) and labels (ending with ':')
+            if line.startswith('//'):
+                # Emit as a comment-only line
+                self.emit(None, comment=f"RAW_ASM:{line}")
+                continue
+            if line.endswith(':'):
+                # Emit as a label
+                label_name = line[:-1]
+                self.emit(None, comment=f"RAW_ASM:{line}", label=label_name)
+                continue
+            # Normal instruction: emit as raw line
+            self.emit(None, comment=f"RAW_ASM:{line}")
+
+        # asm() returns value in register 0
+        return 0
     
     def visit_char_literal(self, node: CharLiteral) -> int:
         """Generate code for character literal."""

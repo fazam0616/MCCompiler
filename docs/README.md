@@ -438,6 +438,44 @@ MCL provides several built-in functions that are recognized as keywords:
 - `malloc(size)`: Allocate memory
 - `free(ptr)`: Free allocated memory
 
+#### Input
+- `readChar()`: Read a single character from the system input buffer and return it as an integer.
+
+    - Syntax: `var c: int = readChar();`
+    - No parameters.
+    - Uses the `KEYIN` assembly instruction under the hood to read one character into RAM, then returns that value in a register.
+    - Blocking semantics: at runtime `readChar()` will wait for input if none is available. In tests or headless runs you can inject input into the CPU input buffer (e.g. `cpu.add_input_char(code)`).
+
+    Example:
+
+    ```mcl
+    function main() {
+            var ch: int = readChar();
+            return ch; // numeric code of the character read
+    }
+    ```
+
+### Inline Assembly: `asm("...")`
+
+- `asm("...")` injects raw assembly text directly into the generated assembly output.
+- The argument must be a single double-quoted string literal. The string may contain multiple lines and comments (use `//` for line comments).
+- The `asm(...)` expression evaluates to the value currently in register 0 (R0) at the time the inline assembly finishes, so you can use it in expressions and assignments just like any other function that returns an integer.
+
+Example:
+
+```mcl
+function main() {
+    // Inline assembly sets R0 to 42, then halts
+    var v: int = asm("MVR i:42, 0\nHALT");
+    return v;
+}
+```
+
+Notes:
+
+- The compiler emits the inline assembly verbatim; it does not validate the syntax of the embedded assembly. Invalid assembly may produce runtime errors in the VM.
+- Use inline assembly sparingly; prefer high-level MCL constructs when possible.
+
 #### GPU Functions
 - `drawLine(x1, y1, x2, y2)`: Draw a line
 - `fillGrid(x, y, width, height)`: Fill a rectangular area

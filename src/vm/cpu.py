@@ -728,14 +728,17 @@ class CPU:
             raise InvalidInstructionException("KEYIN requires 1 operand")
         
         address = self._resolve_operand(instr.operands[0])
-        
-        # Read character from input buffer or stdin in headless mode
-        if self.gpu and self.gpu.pygame_initialized:
-            # GUI mode: blocking read from input buffer
-            char_code = self._blocking_read_input_char()
+        # Prefer input buffer if data has been queued (tests can inject input)
+        if self.input_read_pos != self.input_write_pos:
+            char_code = self.read_input_char()
         else:
-            # Headless mode: read from stdin (always blocking)
-            char_code = self._read_stdin_char()
+            # Read character from input buffer or stdin in headless mode
+            if self.gpu and self.gpu.pygame_initialized:
+                # GUI mode: blocking read from input buffer
+                char_code = self._blocking_read_input_char()
+            else:
+                # Headless mode: read from stdin (always blocking)
+                char_code = self._read_stdin_char()
         
         # Store in memory at specified address
         try:

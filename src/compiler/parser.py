@@ -629,19 +629,31 @@ class Parser:
             return CharLiteral(char)
         
         # Memory management functions
-        if self.match(TokenType.MALLOC, TokenType.FREE):
+        if self.match(TokenType.MALLOC, TokenType.FREE, TokenType.READCHAR):
             mem_func = self.previous().value
             self.consume(TokenType.LEFT_PAREN, f"Expected '(' after {mem_func}")
-            
+
             arguments = []
-            if not self.check(TokenType.RIGHT_PAREN):
-                arguments.append(self.expression())
-                while self.match(TokenType.COMMA):
+            # readChar takes no arguments; malloc/free may take args
+            if mem_func not in ['readChar']:
+                if not self.check(TokenType.RIGHT_PAREN):
                     arguments.append(self.expression())
-            
+                    while self.match(TokenType.COMMA):
+                        arguments.append(self.expression())
+
             self.consume(TokenType.RIGHT_PAREN, f"Expected ')' after {mem_func} arguments")
             return MemoryFunctionCall(mem_func, arguments)
-        
+
+        if self.match(TokenType.ASM):
+            # Expect a string literal containing the assembly text
+            self.consume(TokenType.LEFT_PAREN, "Expected '(' after asm")
+            if self.match(TokenType.STRING):
+                asm_code = self.previous().value
+            else:
+                self.error("Expected string literal in asm(...) call")
+            self.consume(TokenType.RIGHT_PAREN, "Expected ')' after asm(...) arguments")
+            return AsmFunctionCall(asm_code)
+
         # GPU built-in functions
         if self.match(TokenType.DRAWLINE, TokenType.FILLGRID, TokenType.CLEARGRID,
                         TokenType.LOADSPRITE, TokenType.DRAWSPRITE, TokenType.LOADTEXT,

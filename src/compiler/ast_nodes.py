@@ -210,6 +210,15 @@ class MemoryFunctionCall(Expression):
 
 
 @dataclass
+class AsmFunctionCall(Expression):
+    """Inline assembly function call: asm("...") returns int from R0."""
+    asm_text: str
+
+    def accept(self, visitor):
+        return getattr(visitor, 'visit_asm_function_call')(self)
+
+
+@dataclass
 class ArrayAccess(Expression):
     """Array element access expression."""
     array: Expression
