@@ -269,9 +269,21 @@ class Parser:
             var_type = self.type_annotation()
         
         # Optional initializer
-        initializer = None
-        if self.match(TokenType.ASSIGN):
-            initializer = self.expression()
+            initializer = None
+            if self.match(TokenType.ASSIGN):
+                if self.match(TokenType.LEFT_BRACE):
+                    elements = []
+                    self.skip_newlines()
+                    while not self.match(TokenType.RIGHT_BRACE):
+                        elements.append(self.expression())
+                        self.skip_newlines()
+                        if not self.match(TokenType.COMMA):
+                            break
+                        self.skip_newlines()
+                    self.consume(TokenType.RIGHT_BRACE, "Expected '}' after array literal")
+                    initializer = ArrayLiteral(elements)
+                else:
+                    initializer = self.expression()
         
         self.consume(TokenType.SEMICOLON, "Expected ';' after variable declaration")
         return VariableDeclaration(name, var_type, initializer)

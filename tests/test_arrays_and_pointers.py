@@ -32,7 +32,7 @@ def test_pointer_basic():
     code = '''
 function main() {
     var x: int = 5;
-    var p: *int = @x;
+    var p: int* = @x;
     *p = 42;
     return x;
 }
@@ -43,7 +43,7 @@ def test_pointer_to_array():
     code = '''
 function main() {
     var arr: int[2];
-    var p: *int = @arr[0];
+    var p: int* = @arr[0];
     *p = 7;
     *(p + 1) = 8;
     return arr[1];
@@ -66,7 +66,7 @@ function main() {
 
 def test_pointer_as_parameter():
     code = '''
-function set_value(p: *int) {
+function set_value(p: int*) {
     *p = 77;
 }
 function main() {
@@ -81,7 +81,7 @@ def test_pointer_arithmetic():
     code = '''
 function main() {
     var arr: int[3];
-    var p: *int = @arr[0];
+    var p: int* = @arr[0];
     *(p + 2) = 55;
     return arr[2];
 }
@@ -92,7 +92,7 @@ def test_array_deref_and_pointer_mix():
     code = '''
 function main() {
     var arr: int[2];
-    var p: *int = @arr[0];
+    var p: int* = @arr[0];
     *(p + 1) = 99;
     return arr[1];
 }

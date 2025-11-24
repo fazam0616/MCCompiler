@@ -342,7 +342,7 @@ class SymbolTable:
     
     def __init__(self, ram_start: int = 0x1000, ram_size: int = 0x1000):
         self.memory_manager = MemoryManager(ram_start, ram_size)
-        self.register_allocator = RegisterAllocator(self.memory_manager)
+        self.register_allocator = RegisterAllocator(self.memory_manager, self)
         
         self.global_scope = Scope(register_allocator=self.register_allocator)
         self.current_scope = self.global_scope
@@ -485,17 +485,6 @@ class SymbolTable:
         """Resolve a symbol by name."""
         return self.current_scope.resolve(name)
     
-    def access_symbol(self, name: str) -> int:
-        """Access a symbol and return its current register or address."""
-        symbol = self.resolve(name)
-        if not symbol:
-            raise SymbolError(f"Symbol {name} not found")
-        
-        if symbol.is_in_register():
-            return self.register_allocator.access_symbol(name)
-        else:
-            return symbol.address
-    
     def prepare_for_statement(self, required_symbols: List[str]) -> Dict[str, int]:
         """Prepare registers for a statement that needs specific symbols."""
         return self.register_allocator.get_registers_for_scope(required_symbols)
@@ -517,12 +506,15 @@ class SymbolTable:
         self.expression_scope_stack.append(set())
         # Also enter a register allocation scope
         self.register_allocator.enter_register_scope()
+        print(' '*len(self.expression_scope_stack)+"Entering new expression scope: ", len(self.expression_scope_stack))
     
     def exit_expression_scope(self) -> None:
         """Exit the current expression scope and free its temporary registers."""
         if not self.expression_scope_stack:
             return
             
+        print(' '*len(self.expression_scope_stack)+"Exiting expression scope: ", len(self.expression_scope_stack))
+
         temp_registers = self.expression_scope_stack.pop()
         for reg in temp_registers:
             self.register_allocator.free_temporary_register(reg)
@@ -541,7 +533,7 @@ class SymbolTable:
 class RegisterAllocator:
     """Advanced register allocator with spilling support."""
     
-    def __init__(self, memory_manager: MemoryManager):
+    def __init__(self, memory_manager: MemoryManager, symbol_table: SymbolTable = None):
         self.memory_manager = memory_manager
         
         # Register allocation strategy
@@ -581,6 +573,7 @@ class RegisterAllocator:
         
         # Track which registers hold values that haven't been consumed yet
         self.live_registers = set()
+        self.symbol_table = symbol_table
     
     def allocate_register_for_symbol(self, symbol_name: str, is_parameter: bool = False) -> Optional[int]:
         """Allocate a register for a symbol, with spilling if needed."""
@@ -646,7 +639,7 @@ class RegisterAllocator:
         """Free a temporary register."""
         if register in self.temporary_registers:
             self.temporary_registers.remove(register)
-            self._free_register_internal(register)
+            self._free_register_internal(register, True)
             
             # Allow the register to be reused by moving the counter back if appropriate
             # Only reset if this register is higher than the current counter
@@ -655,20 +648,21 @@ class RegisterAllocator:
     
     def free_register(self, register: int) -> None:
         """Free a register (public interface)."""
-        self._free_register_internal(register)
+        self._free_register_internal(register, False)
 
         
     def set_emit_callback(self, callback):
         """Set a callback for emitting assembly instructions (opcode, *args, comment=None)."""
         self._emit_callback = callback
     
-    def _free_register_internal(self, register: int) -> None:
+    def _free_register_internal(self, register: int, delete_symbol: bool = False) -> None:
         """Internal method to free a register and update tracking."""
-        if register in self.register_to_symbol:
+        if register in self.register_to_symbol and delete_symbol:
             symbol = self.register_to_symbol[register]
             del self.register_to_symbol[register]
             del self.symbol_to_register[symbol]
             del self.register_usage_count[register]
+            print(' ' * (len(self.symbol_table.expression_scope_stack) ) + f"Freed symbol {symbol} in R{register} ")
         
         self.mark_register_available(register)
         
@@ -679,7 +673,12 @@ class RegisterAllocator:
             del self.register_scope_depth[register]
     
     def access_symbol(self, symbol_name: str) -> int:
-        """Access a symbol, loading from RAM if spilled."""
+        """Access a symbol, loading from RAM if spilled or stored in RAM."""
+        # Use symbol table to resolve symbol
+        symbol: Optional[Symbol] = None
+        if self.symbol_table:
+            symbol = self.symbol_table.current_scope.resolve(symbol_name)
+
         # If in register, update usage and return
         if symbol_name in self.symbol_to_register:
             reg = self.symbol_to_register[symbol_name]
@@ -687,15 +686,17 @@ class RegisterAllocator:
             return reg
 
         # If spilled, need to load back into register
-        if symbol_name in self.spilled_symbols:
-            reg = self.allocate_temporary_register()
+        if symbol_name in self.spilled_symbols or (symbol and symbol.is_in_ram()):
+            reg = self.allocate_register_for_symbol(symbol_name, False)
             if reg is None:
                 raise RuntimeError(f"Cannot allocate register for spilled symbol {symbol_name}")
-
-            ram_addr = self.spilled_symbols[symbol_name]
+            if (symbol and symbol.is_in_ram()):
+                ram_addr = symbol.address
+            else:
+                ram_addr = self.spilled_symbols[symbol_name]
+                print(f"Reloading spilled symbol {symbol_name} from RAM address {ram_addr} into register R{reg}")
             if hasattr(self, '_emit_callback') and self._emit_callback:
                 self._emit_callback('READ', ram_addr, reg, comment=f"Reload {symbol_name} from RAM")
-
             self._assign_register_to_symbol(reg, symbol_name)
             self.mark_register_used(reg)
             self.register_scope_depth[reg] = len(self.register_availability_stack) - 1
@@ -703,7 +704,7 @@ class RegisterAllocator:
             del self.spilled_symbols[symbol_name]
             return reg
 
-        raise RuntimeError(f"Symbol {symbol_name} not found in registers or spilled memory")
+        raise RuntimeError(f"Symbol {symbol_name} not found in registers, spilled memory, or RAM")
     
     def spill_symbol(self, symbol_name: str) -> bool:
         """Spill a symbol from register to RAM."""
@@ -711,6 +712,7 @@ class RegisterAllocator:
             return False
 
         reg = self.symbol_to_register[symbol_name]
+
 
         # # Check if register is live
         # if self.is_register_live(reg):
@@ -720,6 +722,7 @@ class RegisterAllocator:
         ram_addr = self.memory_manager.allocate_memory(f"spill_{symbol_name}", 1)
         if ram_addr is None:
             return False
+        print(f"Spilling symbol {symbol_name} from register R{reg} to RAM address {ram_addr}")
 
         # Emit LOAD instruction: LOAD reg, ram_addr
         if hasattr(self, '_emit_callback') and self._emit_callback:
@@ -769,6 +772,7 @@ class RegisterAllocator:
         self.register_to_symbol[register] = symbol_name
         self.symbol_to_register[symbol_name] = register
         self.register_usage_count[register] = 0
+        print(' ' * (len(self.symbol_table.expression_scope_stack)) + f"Assigned symbol {symbol_name} to register R{register}")
     
     def _spill_and_allocate(self, symbol_name: str, is_parameter: bool) -> Optional[int]:
         """Spill least recently used symbol and allocate register."""
@@ -821,24 +825,26 @@ class RegisterAllocator:
         min_usage = float('inf')
         
         for reg in range(self.LOCAL_START, self.PARAM_START, -1):
-            if (reg in self.register_to_symbol and 
-                reg not in self.ALU_REGISTERS and
-                not self.is_register_live(reg)):
+            if (
+                reg not in self.ALU_REGISTERS ):
                 usage = self.register_usage_count.get(reg, 0)
                 if usage < min_usage:
                     min_usage = usage
                     lru_reg = reg
         
         if lru_reg is None:
+            print(' ' * (len(self.symbol_table.expression_scope_stack)) + "No non-live registers available to spill")
             # No non-live registers available to spill
             # This is a critical situation - we might need to spill a live register
             # or increase the number of available registers
             return None
         
-        # Spill the LRU symbol
-        lru_symbol = self.register_to_symbol[lru_reg]
-        if not self.spill_symbol(lru_symbol):
-            return None
+        # Guard against KeyError: only spill if lru_reg is mapped to a symbol
+        if lru_reg in self.register_to_symbol:
+            # Spill the LRU symbol
+            lru_symbol = self.register_to_symbol[lru_reg]
+            if not self.spill_symbol(lru_symbol):
+                return None
         
         temp_name = f"__temp_{self.temp_register_counter}"
         self.temp_register_counter += 1
@@ -887,17 +893,17 @@ class RegisterAllocator:
         ]
         
         for reg in registers_to_free:
-            self._free_register_internal(reg)
+            self._free_register_internal(reg, True)
         
-        # Clean up spilled symbols that were spilled at this scope depth
-        # (This prevents memory leaks of spilled data that's no longer needed)
-        symbols_to_unspill = []
-        for symbol_name, ram_addr in list(self.spilled_symbols.items()):
-            # Check if this symbol should be cleaned up
-            # For now, we keep spilled symbols across scopes for safety
-            # TODO: Track which scope each symbol was spilled in for more aggressive cleanup
-            print('TODO: Skipping spilled symbol cleanup for', symbol_name, 'at address', ram_addr)
-            pass
+        # # Clean up spilled symbols that were spilled at this scope depth
+        # # (This prevents memory leaks of spilled data that's no longer needed)
+        # symbols_to_unspill = []
+        # for symbol_name, ram_addr in list(self.spilled_symbols.items()):
+        #     # Check if this symbol should be cleaned up
+        #     # For now, we keep spilled symbols across scopes for safety
+        #     # TODO: Track which scope each symbol was spilled in for more aggressive cleanup
+        #     print('TODO: Skipping spilled symbol cleanup for', symbol_name, 'at address', ram_addr)
+        #     pass
         
         # Pop the scope
         self.register_availability_stack.pop()

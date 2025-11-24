@@ -96,7 +96,13 @@ class CharLiteral(Expression):
     
     def accept(self, visitor):
         return visitor.visit_char_literal(self)
-
+    
+@dataclass
+class ArrayLiteral(Expression):
+    elements: List[Expression]
+    
+    def accept(self, visitor):
+        return visitor.visit_array_literal(self)
 
 @dataclass
 class Identifier(Expression):

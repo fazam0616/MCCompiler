@@ -425,6 +425,12 @@ class AssemblyGenerator(ASTVisitor):
             mult_reg = self.symbol_table.allocate_temporary()
             self.emit(InstructionType.MVR, 0, mult_reg, comment="Save product for modulo")
             self.emit(InstructionType.SUB, left_reg, mult_reg, comment="Modulo: a - (a / b) * b")
+                # Free temporaries early
+            self.symbol_table.register_allocator.free_temporary_register(div_reg)
+            self.symbol_table.register_allocator.free_temporary_register(mult_reg)
+            if left_in_r0:
+                self.symbol_table.register_allocator.free_temporary_register(left_reg)
+            self.symbol_table.register_allocator.free_temporary_register(right_reg)
             self.symbol_table.exit_expression_scope()
             return 0
         elif node.operator == BinaryOperator.LOGICAL_AND:
@@ -438,6 +444,9 @@ class AssemblyGenerator(ASTVisitor):
             self.emit_label(false_label)
             self.emit_immediate(InstructionType.MVR, 0, result_reg, comment="Logical AND: false")
             self.emit(InstructionType.MVR, 0, 0, label=end_label)
+                # Free temporaries early
+            self.symbol_table.register_allocator.free_temporary_register(left_reg)
+            self.symbol_table.register_allocator.free_temporary_register(right_reg)
             self.symbol_table.exit_expression_scope()
             return result_reg
         elif node.operator == BinaryOperator.LOGICAL_OR:
@@ -451,6 +460,9 @@ class AssemblyGenerator(ASTVisitor):
             self.emit_label(true_label)
             self.emit_immediate(InstructionType.MVR, 1, result_reg, comment="Logical OR: true")
             self.emit(InstructionType.MVR, 0, 0, label=end_label)
+            # Free temporaries early
+            self.symbol_table.register_allocator.free_temporary_register(left_reg)
+            self.symbol_table.register_allocator.free_temporary_register(right_reg)
             self.symbol_table.exit_expression_scope()
             return result_reg
         elif node.operator in [
@@ -471,6 +483,7 @@ class AssemblyGenerator(ASTVisitor):
                 self.emit_immediate(InstructionType.MVR, 0x8000, temp_reg, comment="Load sign bit mask")
                 self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
                 self.emit(InstructionType.JNZ, true_label, 0, comment="Jump if negative (less than)")
+                self.symbol_table.register_allocator.free_temporary_register(temp_reg)
             elif node.operator == BinaryOperator.GREATER_THAN:
                 else_label = self.generate_label("nt_grtr")
                 self.emit(InstructionType.JZ, else_label, 0, comment="Jump if equal (not greater)")
@@ -479,18 +492,21 @@ class AssemblyGenerator(ASTVisitor):
                 self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
                 self.emit(InstructionType.JZ, true_label, 0, comment="Jump if positive (greater than)")
                 self.emit_label(else_label)
+                self.symbol_table.register_allocator.free_temporary_register(temp_reg)
             elif node.operator == BinaryOperator.LESS_EQUAL:
                 self.emit(InstructionType.JZ, true_label, 0, comment="Jump if equal")
                 temp_reg = self.symbol_table.allocate_temporary()
                 self.emit_immediate(InstructionType.MVR, 0x8000, temp_reg, comment="Load sign bit mask")
                 self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
                 self.emit(InstructionType.JNZ, true_label, 0, comment="Jump if negative (less than)")
+                self.symbol_table.register_allocator.free_temporary_register(temp_reg)
             elif node.operator == BinaryOperator.GREATER_EQUAL:
                 self.emit(InstructionType.JZ, true_label, 0, comment="Jump if equal")
                 temp_reg = self.symbol_table.allocate_temporary()
                 self.emit_immediate(InstructionType.MVR, 0x8000, temp_reg, comment="Load sign bit mask")
                 self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
                 self.emit(InstructionType.JZ, true_label, 0, comment="Jump if positive (greater than)")
+                self.symbol_table.register_allocator.free_temporary_register(temp_reg)
             else:
                 self.symbol_table.exit_expression_scope()
                 raise CodeGenerationError(f"Unsupported comparison operator: {node.operator}")
@@ -500,6 +516,9 @@ class AssemblyGenerator(ASTVisitor):
             self.emit_label(true_label)
             self.emit_immediate(InstructionType.MVR, 1, result_reg, comment="True case")
             self.emit(InstructionType.MVR, 0, 0, label=end_label)
+            # Free temporaries early
+            self.symbol_table.register_allocator.free_temporary_register(left_reg)
+            self.symbol_table.register_allocator.free_temporary_register(right_reg)
             self.symbol_table.exit_expression_scope()
             return result_reg
         else:
@@ -521,6 +540,9 @@ class AssemblyGenerator(ASTVisitor):
             }
             if node.operator in op_map:
                 self.emit(op_map[node.operator], left_reg, right_reg, comment=f"{node.operator.value} operation")
+                # Free temporaries early
+                self.symbol_table.register_allocator.free_temporary_register(left_reg)
+                self.symbol_table.register_allocator.free_temporary_register(right_reg)
                 self.symbol_table.exit_expression_scope()
                 return 0  # Result in register 0 (ALU output)
             else:
@@ -561,21 +583,23 @@ class AssemblyGenerator(ASTVisitor):
             if symbol_name:
                 symbol = self.symbol_table.resolve(symbol_name)
                 if symbol:
+                    # If symbol is an array, always in RAM
+                    if symbol.kind == SymbolKind.ARRAY or symbol.storage_location == StorageLocation.RAM:
+                        result_reg = self.symbol_table.allocate_temporary()
+                        self.emit_immediate(InstructionType.MVR, symbol.address, result_reg, comment=f"Address of {symbol_name} (RAM)")
+                        self.symbol_table.exit_expression_scope()
+                        return result_reg
                     # If symbol is in register, move it to RAM
                     if symbol.storage_location == StorageLocation.REGISTER:
-                        # Allocate RAM for the symbol
                         ram_addr = self.symbol_table.memory_manager.allocate_memory(symbol.name, symbol.size)
-                        # Move value from register to RAM
                         self.emit(InstructionType.LOAD, symbol.address, Operand(ram_addr, True), comment=f"Move {symbol_name} from R{symbol.address} to RAM (immediate address)")
-                        # Free the old register
                         self.symbol_table.register_allocator.free_register(symbol.address)
-                        # Update symbol to reference RAM
                         symbol.storage_location = StorageLocation.RAM
                         symbol.address = ram_addr
-                    result_reg = self.symbol_table.allocate_temporary()
-                    self.emit_immediate(InstructionType.MVR, symbol.address, result_reg, comment=f"Address of {symbol_name}")
-                    self.symbol_table.exit_expression_scope()
-                    return result_reg
+                        result_reg = self.symbol_table.allocate_temporary()
+                        self.emit_immediate(InstructionType.MVR, ram_addr, result_reg, comment=f"Address of {symbol_name} (moved to RAM)")
+                        self.symbol_table.exit_expression_scope()
+                        return result_reg
             # If not a simple variable, evaluate the operand and return its register (address)
             addr_reg = node.operand.accept(self)
             self.symbol_table.exit_expression_scope()
@@ -599,7 +623,7 @@ class AssemblyGenerator(ASTVisitor):
             if not symbol:
                 raise CodeGenerationError(f"Undefined variable: {node.target.name}")
             # Get current storage location for the symbol
-            target_reg = self.symbol_table.access_symbol(node.target.name)
+            target_reg = self.symbol_table.register_allocator.access_symbol(node.target.name)
             if symbol.storage_location == StorageLocation.RAM:
                 # Use immediate for RAM address
                 self.emit(InstructionType.LOAD, value_reg, Operand(symbol.address, True),
@@ -838,6 +862,22 @@ class AssemblyGenerator(ASTVisitor):
         self.emit(InstructionType.READ, 0, result_reg, comment="Load array element (fallback)")
         return result_reg
     
+    
+    def visit_array_literal(self, node: ArrayLiteral) -> int:
+        # Allocate contiguous RAM for the array
+        size = len(node.elements)
+        ram_addr = self.symbol_table.memory_manager.allocate_memory("array_literal_temp_{}".format(self.label_counter), size)
+        self.label_counter += 1
+        # Emit code to initialize each element
+        for i, elem in enumerate(node.elements):
+            value_reg = elem.accept(self)
+            addr = ram_addr + i
+            self.emit(InstructionType.LOAD, value_reg, Operand(addr, True), comment=f"Init array literal element {i}")
+        # Return base RAM address as a temporary register
+        result_reg = self.symbol_table.allocate_temporary()
+        self.emit_immediate(InstructionType.MVR, ram_addr, result_reg, comment="Array literal base address")
+        return result_reg
+
     def visit_integer_literal(self, node: IntegerLiteral) -> int:
         """Generate code for integer literal."""
         result_reg = self.symbol_table.allocate_temporary()
@@ -875,7 +915,7 @@ class AssemblyGenerator(ASTVisitor):
                 return result_reg
             else:
                 # In register - get current register location
-                return self.symbol_table.access_symbol(node.name)
+                return self.symbol_table.register_allocator.access_symbol(node.name)
     
     # Type visitors (no code generation needed)
     def visit_int_type(self, node: IntType) -> None:
