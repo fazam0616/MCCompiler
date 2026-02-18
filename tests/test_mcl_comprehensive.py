@@ -40,12 +40,14 @@ class MCLTestCase:
         self.max_cycles = max_cycles
 
 
-def compile_and_run_mcl(mcl_code: str, max_cycles: int = 10000) -> Tuple[int, str]:
+def compile_and_run_mcl(mcl_code: str, max_cycles: int = 10000, enable_gpu: bool = False) -> Tuple[int, str]:
     """Compile MCL code and run it, returning the return value and any errors.
     
     Args:
         mcl_code: MCL source code
         max_cycles: Maximum CPU cycles to run
+        enable_gpu: Whether to create a GPU instance (needed for GPU register tests).
+                    The GPU display is never initialized, so no window is opened.
     
     Returns:
         Tuple of (return_value, error_message). If successful, error_message is empty.
@@ -57,7 +59,7 @@ def compile_and_run_mcl(mcl_code: str, max_cycles: int = 10000) -> Tuple[int, st
         assembly_code = generate_assembly(ast)
         
         # Create and run VM
-        config = {'enable_gpu': False}  # Headless for testing
+        config = {'enable_gpu': enable_gpu}
         vm = create_vm(config)
         
         try:

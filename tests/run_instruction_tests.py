@@ -60,48 +60,60 @@ def create_test_suite():
 
 def run_instruction_tests(verbosity=2):
     """Run all instruction tests with detailed output."""
-    print("=" * 70)
-    print("MCL CPU INSTRUCTION TEST SUITE")
-    print("=" * 70)
-    print()
-    
-    suite = create_test_suite()
-    runner = unittest.TextTestRunner(
-        verbosity=verbosity,
-        stream=sys.stdout,
-        descriptions=True,
-        failfast=False
-    )
-    
-    print(f"Running {suite.countTestCases()} instruction tests...")
-    print()
-    
-    result = runner.run(suite)
-    
-    print()
-    print("=" * 70)
-    print("TEST SUMMARY")
-    print("=" * 70)
-    print(f"Tests run: {result.testsRun}")
-    print(f"Failures: {len(result.failures)}")
-    print(f"Errors: {len(result.errors)}")
-    print(f"Skipped: {len(result.skipped) if hasattr(result, 'skipped') else 0}")
-    
-    if result.failures:
-        print(f"\nFAILURES ({len(result.failures)}):")
-        for test, traceback in result.failures:
-            print(f"  - {test}")
-    
-    if result.errors:
-        print(f"\nERRORS ({len(result.errors)}):")
-        for test, traceback in result.errors:
-            print(f"  - {test}")
-    
-    success = len(result.failures) == 0 and len(result.errors) == 0
-    print(f"\nOVERALL: {'PASS' if success else 'FAIL'}")
-    print("=" * 70)
-    
-    return success
+    try:
+        print("=" * 70)
+        print("MCL CPU INSTRUCTION TEST SUITE")
+        print("=" * 70)
+        print()
+        
+        suite = create_test_suite()
+        runner = unittest.TextTestRunner(
+            verbosity=verbosity,
+            stream=sys.stdout,
+            descriptions=True,
+            failfast=False
+        )
+        
+        print(f"Running {suite.countTestCases()} instruction tests...")
+        print()
+        
+        result = runner.run(suite)
+        
+        print()
+        print("=" * 70)
+        print("TEST SUMMARY")
+        print("=" * 70)
+        print(f"Tests run: {result.testsRun}")
+        print(f"Failures: {len(result.failures)}")
+        print(f"Errors: {len(result.errors)}")
+        print(f"Skipped: {len(result.skipped) if hasattr(result, 'skipped') else 0}")
+        
+        if result.failures:
+            print(f"\nFAILURES ({len(result.failures)}):")
+            for test, traceback in result.failures:
+                print(f"  - {test}")
+        
+        if result.errors:
+            print(f"\nERRORS ({len(result.errors)}):")
+            for test, traceback in result.errors:
+                print(f"  - {test}")
+        
+        success = len(result.failures) == 0 and len(result.errors) == 0
+        print(f"\nCPU INSTRUCTION TESTS: {'PASS' if success else 'FAIL'}")
+        print("=" * 70)
+        
+        return success
+        
+    except Exception as e:
+        print()
+        print("=" * 70)
+        print("TEST SUMMARY")
+        print("=" * 70)
+        print(f"CRITICAL ERROR: Instruction test execution crashed")
+        print(f"Error: {e}")
+        print(f"\nCPU INSTRUCTION TESTS: FAIL")
+        print("=" * 70)
+        return False
 
 
 def run_single_instruction_test(instruction_name, verbosity=2):

@@ -29,7 +29,7 @@ This creates `my_first_program.asm` containing the assembly code.
 ### 3. Run the Program
 
 ```bash
-python src/vm/virtual_machine.py --file my_first_program.asm
+python mcl_vm.py --file my_first_program.asm
 ```
 
 ## Language Basics
@@ -68,9 +68,12 @@ function main() {
     int count = 10;
     int* ptr;
     
-    // Arrays
+    // Arrays (uninitialized)
     var numbers: int[10];
     var letters: char[5];
+
+    // Arrays with literal initializers
+    var primes: int[5] = {2, 3, 5, 7, 11};
     
     return 0;
 }
@@ -206,11 +209,9 @@ function animate_square() {
     // Draw a line
     drawLine(0, 0, 31, 31);
 
-    // Set edit buffer to 1 (buffer 1)
-    setGPUBuffer(0, 1); // 0 = edit buffer, 1 = buffer 1
-
-    // Set display buffer to 0 (buffer 0)
-    setGPUBuffer(1, 0); // 1 = display buffer, 0 = buffer 0
+    // Double-buffering: draw to buffer 1, display buffer 0
+    setGPUBuffer(0, 1); // 0 = edit buffer selector, 1 = use buffer 1
+    setGPUBuffer(1, 0); // 1 = display buffer selector, 0 = use buffer 0
 
     // Query buffer state
     var editBuf: int = getGPUBuffer(0); // returns 0 or 1
@@ -220,32 +221,31 @@ function animate_square() {
 }
 ```
 
-#### setGPUBuffer(a, b)
-Sets the GPU buffer state. `a` is 0 for edit buffer, 1 for display buffer. `b` is 0 or 1 (buffer index).
+#### setGPUBuffer(selector, buffer_id)
+Sets a GPU buffer pointer. `selector` is 0 for the edit buffer, 1 for the display buffer. `buffer_id` is 0 or 1.
 
-#### getGPUBuffer(a)
-Returns the current buffer index (0 or 1) for the requested buffer. `a` is 0 for edit buffer, 1 for display buffer.
+#### getGPUBuffer(selector)
+Returns the current buffer index (0 or 1) for the given selector. `selector` is 0 for the edit buffer, 1 for the display buffer.
 
 ### Assembly GPU Register Access
 
 For direct GPU control, use assembly language:
 
 ```assembly
-// Switch edit buffer to buffer 1
-MVR i:1, 0
+// Switch display to buffer 1, keep edit on buffer 0
+// GPU register: bit 0 = display buffer id, bit 1 = edit buffer id
+MVR i:1, 0      // value: display=1, edit=0  →  bit0=1, bit1=0 → 0x01
 MVR 0, GPU
 
-// Draw operations happen on buffer 1
-// ... drawing commands ...
-
-// Switch display to buffer 1 (value 17 = edit buffer 1 + display buffer 1)
-MVR i:17, 0
+// Switch both to buffer 1 (display=1, edit=1 → bit0=1, bit1=1 → 0x03)
+MVR i:3, 0
 MVR 0, GPU
 ```
 
 The GPU register bits:
-- Bits 0-15: Edit buffer selection (0 or 1) 
-- Bits 16-31: Display buffer selection (0 or 1)
+- Bit 0: Display buffer ID (0 or 1)
+- Bit 1: Edit buffer ID (0 or 1)
+- Bits 2-31: Reserved
 
 ## Working with the Tools
 
@@ -261,44 +261,67 @@ python src/compiler/main.py program.mcl -o custom_name.asm
 # Enable debug output
 python src/compiler/main.py program.mcl --debug
 
-# Validate syntax only (don't generate assembly)
-python src/compiler/main.py program.mcl --validate-only
+# Enable optimizations (placeholder, reserved for future use)
+python src/compiler/main.py program.mcl --optimize
+```
+
+You can also use the top-level `build.py` wrapper to compile an `.mcl` file and run the test suite:
+
+```bash
+python build.py program.mcl   # compile program.mcl → program.asm
 ```
 
 ### Virtual Machine Options
 
 ```bash
-# Run with graphics
-python src/vm/virtual_machine.py --file program.asm
+# Run with graphics (full speed by default)
+python mcl_vm.py --file program.asm
 
-# Run without graphics (faster)
-python src/vm/virtual_machine.py --file program.asm --headless
+# Start paused (use the GUI play button or debugger to resume)
+python mcl_vm.py --file program.asm --paused
+
+# Run without graphics (headless, faster for testing)
+python mcl_vm.py --file program.asm --headless
 
 # Enable debugging output  
-python src/vm/virtual_machine.py --file program.asm --debug
+python mcl_vm.py --file program.asm --debug
 
-# Set display scale (default is 2)
-python src/vm/virtual_machine.py --file program.asm --scale 3
+# Set display scale factor (default is 2)
+python mcl_vm.py --file program.asm --scale 3
 
-# Control CPU speed (0.5Hz to 1kHz exponential scaling)
-# Speed is adjustable via GUI slider during execution
+# Speed is also adjustable via the GUI slider during execution
+# The high-speed toggle in the GUI disables cycle-rate throttling entirely
 ```
 
 ### Interactive Debugger
 
 ```bash
-# Start debugger
+# Start interactive debugger
 python src/debugger/main.py program.asm
 
-# Debugger commands:
-# step      - Execute one instruction
-# next      - Execute until next line
-# continue  - Continue execution
-# break 10  - Set breakpoint at line 10
-# registers - Show all register values
-# memory    - Show memory contents
-# quit      - Exit debugger
+# Start debug adapter for VSCode DAP integration
+python src/debugger/main.py --adapter
 ```
+
+Debugger commands:
+
+| Command | Description |
+|---------|-------------|
+| `step [N]` | Execute N instructions (default 1) |
+| `continue` | Resume execution until next breakpoint or halt |
+| `pause` | Pause a running program |
+| `stop` | Stop execution |
+| `reset` | Reset the virtual machine |
+| `break <addr>` | Set breakpoint at address (decimal or 0x hex) |
+| `delete <addr>` | Remove breakpoint at address |
+| `clear` | Remove all breakpoints |
+| `registers [start] [count]` | Show register values |
+| `memory [addr] [count]` | Show memory contents |
+| `program [start] [count]` | Show disassembled instructions around PC |
+| `status` | Show current VM state |
+| `set reg <n> <val>` | Write a register |
+| `set mem <addr> <val>` | Write a memory location |
+| `quit` / `exit` | Exit the debugger |
 
 ## Common Patterns
 
@@ -477,14 +500,16 @@ Notes:
 - Use inline assembly sparingly; prefer high-level MCL constructs when possible.
 
 #### GPU Functions
-- `drawLine(x1, y1, x2, y2)`: Draw a line
-- `fillGrid(x, y, width, height)`: Fill a rectangular area
-- `clearGrid(x, y, width, height)`: Clear a rectangular area
-- `loadSprite(data)`: Load sprite data
-- `drawSprite(x, y, sprite_id)`: Draw a loaded sprite
-- `loadText(text)`: Load text data
-- `drawText(x, y, text_id)`: Draw loaded text
-- `scrollBuffer()`: Scroll the display buffer
+- `drawLine(x1, y1, x2, y2)`: Draw a line between two pixel coordinates
+- `fillGrid(x, y, width, height)`: Fill a rectangular area (set pixels to 1)
+- `clearGrid(x, y, width, height)`: Clear a rectangular area (set pixels to 0)
+- `loadSprite(sprite_id, data)`: Load a 5×3 sprite (15-bit data) into slot `sprite_id` (0–31)
+- `drawSprite(sprite_id, x, y)`: Draw a previously loaded sprite at `(x, y)`
+- `loadText(text_id, char_code)`: Load a 6-bit character code into text slot `text_id`
+- `drawText(text_id, x, y)`: Render the character in slot `text_id` at `(x, y)` using the 3×4 font
+- `scrollBuffer(offx, offy)`: Scroll the edit buffer by `offx` pixels horizontally and `offy` pixels vertically
+- `setGPUBuffer(selector, buffer_id)`: Point edit (selector=0) or display (selector=1) at buffer 0 or 1
+- `getGPUBuffer(selector)`: Return which buffer (0 or 1) edit or display is currently pointing at
 
 ## Troubleshooting
 

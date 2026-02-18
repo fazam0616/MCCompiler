@@ -15,89 +15,124 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 def run_unit_tests():
     """Run all unit tests."""
     print("Running unit tests...")
+    print("=" * 40)
     
-    # Discover and run tests
-    loader = unittest.TestLoader()
-    start_dir = Path(__file__).parent
-    suite = loader.discover(start_dir, pattern='test_*.py')
-    
-    runner = unittest.TextTestRunner(verbosity=2)
-    result = runner.run(suite)
-    
-    return result.wasSuccessful()
-
-
-# def run_integration_tests():
-#     """Run integration tests with example files."""
-#     print("\nRunning integration tests...")
-    
-#     examples_dir = Path(__file__).parent.parent / 'examples'
-#     compiler_path = Path(__file__).parent.parent / 'src' / 'compiler' / 'main.py'
-    
-#     success = True
-    
-#     for mcl_file in examples_dir.glob('*.mcl'):
-#         print(f"Testing compilation of {mcl_file.name}...")
+    try:
+        # Discover and run tests
+        loader = unittest.TestLoader()
+        start_dir = Path(__file__).parent
+        suite = loader.discover(start_dir, pattern='test_*.py')
         
-#         try:
-#             # Try to compile the example
-#             result = subprocess.run([
-#                 sys.executable, str(compiler_path),
-#                 str(mcl_file)
-#             ], capture_output=True, text=True, timeout=30)
-            
-#             if result.returncode != 0:
-#                 print(f"FAILED: {mcl_file.name}")
-#                 print(f"Error: {result.stderr}")
-#                 success = False
-#             else:
-#                 print(f"PASSED: {mcl_file.name}")
-                
-#         except subprocess.TimeoutExpired:
-#             print(f"TIMEOUT: {mcl_file.name}")
-#             success = False
-#         except Exception as e:
-#             print(f"ERROR: {mcl_file.name} - {e}")
-#             success = False
-    
-#     return success
-
-
-# def run_vm_tests():
-#     """Test virtual machine with example assembly."""
-#     print("\nRunning VM tests...")
-    
-#     examples_dir = Path(__file__).parent.parent / 'examples'
-#     vm_path = Path(__file__).parent.parent / 'src' / 'vm' / 'virtual_machine.py'
-    
-#     success = True
-    
-#     for asm_file in examples_dir.glob('*.asm'):
-#         print(f"Testing VM execution of {asm_file.name}...")
+        runner = unittest.TextTestRunner(verbosity=2)
+        result = runner.run(suite)
         
-#         try:
-#             # Try to run the assembly in VM
-#             result = subprocess.run([
-#                 sys.executable, str(vm_path),
-#                 '--file', str(asm_file),
-#                 '--headless'  # Run without graphics
-#             ], capture_output=True, text=True, timeout=10)
-            
-#             if result.returncode != 0:
-#                 print(f"FAILED: {asm_file.name}")
-#                 print(f"Error: {result.stderr}")
-#                 success = False
-#             else:
-#                 print(f"PASSED: {asm_file.name}")
-                
-#         except subprocess.TimeoutExpired:
-#             print(f"TIMEOUT: {asm_file.name}")
-#             success = False
-#         except Exception as e:
-#             print(f"ERROR: {asm_file.name} - {e}")
-#             success = False
+        # Print summary
+        print("\n" + "=" * 40)
+        print("UNIT TEST SUMMARY")
+        print("=" * 40)
+        print(f"Tests run: {result.testsRun}")
+        print(f"Failures: {len(result.failures)}")
+        print(f"Errors: {len(result.errors)}")
+        
+        # List errors if any (import errors, crashes, etc.)
+        if result.errors:
+            print(f"\nERRORS (crashes, import failures, etc.):")
+            for test, traceback in result.errors:
+                print(f"  - {test}")
+                # Print first line of error for context
+                error_lines = traceback.strip().split('\n')
+                if error_lines:
+                    print(f"    {error_lines[-1][:80]}")
+        
+        # wasSuccessful() returns False if there were failures OR errors
+        success = result.wasSuccessful()
+        print(f"\nResult: {'PASS' if success else 'FAIL'}")
+        print("=" * 40)
+        
+        return success
+        
+    except Exception as e:
+        # Catch any discovery or execution crashes
+        print("\n" + "=" * 40)
+        print("UNIT TEST SUMMARY")
+        print("=" * 40)
+        print(f"CRITICAL ERROR: Test discovery or execution crashed")
+        print(f"Error: {e}")
+        print(f"\nResult: FAIL")
+        print("=" * 40)
+        return False
+
+
+def run_integration_tests():
+    """Run integration tests with example files."""
+    print("\nRunning integration tests...")
     
-#     return success
+    examples_dir = Path(__file__).parent.parent / 'examples'
+    compiler_path = Path(__file__).parent.parent / 'src' / 'compiler' / 'main.py'
+    
+    success = True
+    
+    for mcl_file in examples_dir.glob('*.mcl'):
+        print(f"Testing compilation of {mcl_file.name}...")
+        
+        try:
+            # Try to compile the example
+            result = subprocess.run([
+                sys.executable, str(compiler_path),
+                str(mcl_file)
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.returncode != 0:
+                print(f"FAILED: {mcl_file.name}")
+                print(f"Error: {result.stderr}")
+                success = False
+            else:
+                print(f"PASSED: {mcl_file.name}")
+                
+        except subprocess.TimeoutExpired:
+            print(f"TIMEOUT: {mcl_file.name}")
+            success = False
+        except Exception as e:
+            print(f"ERROR: {mcl_file.name} - {e}")
+            success = False
+    
+    return success
+
+
+def run_vm_tests():
+    """Test virtual machine with example assembly."""
+    print("\nRunning VM tests...")
+    
+    examples_dir = Path(__file__).parent.parent / 'examples'
+    vm_path = Path(__file__).parent.parent / 'src' / 'vm' / 'virtual_machine.py'
+    
+    success = True
+    
+    for asm_file in examples_dir.glob('*.asm'):
+        print(f"Testing VM execution of {asm_file.name}...")
+        
+        try:
+            # Run the assembly in VM - not headless so interactive programs
+            # can receive user input via the GPU window
+            result = subprocess.run([
+                sys.executable, str(vm_path),
+                '--file', str(asm_file),
+            ], timeout=10)
+            
+            if result.returncode != 0:
+                print(f"FAILED: {asm_file.name} (exit code {result.returncode})")
+                success = False
+            else:
+                print(f"PASSED: {asm_file.name}")
+                
+        except subprocess.TimeoutExpired:
+            print(f"TIMEOUT: {asm_file.name}")
+            success = False
+        except Exception as e:
+            print(f"ERROR: {asm_file.name} - {e}")
+            success = False
+    
+    return success
 
 
 def run_instruction_tests():
@@ -108,10 +143,16 @@ def run_instruction_tests():
         from run_instruction_tests import run_instruction_tests as run_cpu_tests
         return run_cpu_tests(verbosity=1)
     except ImportError as e:
-        print(f"Could not import instruction tests: {e}")
+        print("=" * 70)
+        print(f"ERROR: Could not import instruction tests: {e}")
+        print("CPU INSTRUCTION TESTS: FAIL")
+        print("=" * 70)
         return False
     except Exception as e:
-        print(f"Error running instruction tests: {e}")
+        print("=" * 70)
+        print(f"ERROR: Instruction tests crashed: {e}")
+        print("CPU INSTRUCTION TESTS: FAIL")
+        print("=" * 70)
         return False
 
 
@@ -131,8 +172,8 @@ def main():
         all_passed = False
     
     # Run integration tests
-    # if not run_integration_tests():
-    #     all_passed = False
+    if not run_integration_tests():
+        all_passed = False
     
     # Run VM tests
     # if not run_vm_tests():
@@ -140,10 +181,10 @@ def main():
     
     print("\n" + "=" * 40)
     if all_passed:
-        print("All tests PASSED! ✅")
+        print("All tests PASSED!")
         sys.exit(0)
     else:
-        print("Some tests FAILED! ❌")
+        print("Some tests FAILED!")
         sys.exit(1)
 
 

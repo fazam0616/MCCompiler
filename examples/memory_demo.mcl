@@ -35,4 +35,5 @@ function main() {
     
     *conditional_ptr = size * 2;
     free(conditional_ptr);
+    return 0;
 }

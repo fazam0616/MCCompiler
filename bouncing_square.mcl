@@ -1,0 +1,66 @@
+// MCL Bouncing Square Program
+// Bounces a square diagonally across the screen like a DVD logo
+
+function main() {
+    // Screen dimensions (32x32 grid)
+    var screen_width: int = 32;
+    var screen_height: int = 32;
+    
+    // Square properties
+    var square_size: int = 4;
+    var x: int = 25;          // Starting X position
+    var y: int = 27;          // Starting Y position
+    var dx: int = -1;         // X velocity (1 = right, -1 = left)
+    var dy: int = -1;         // Y velocity (1 = down, -1 = up)
+    
+    // Animation delay counter
+    var delay: int = 0;
+    var delay_max: int = 10;  // Adjust for animation speed
+    
+    // Infinite loop
+    while (1) {
+        // Clear the entire screen
+        clearGrid(0, 0, screen_width, screen_height);
+
+        drawLine(0, 0, 0, screen_height - 1); // Vertical line on the left edge
+        drawLine(screen_width - 1, 0, screen_width - 1, screen_height - 1); // Vertical line on the right edge
+        
+        // Draw the square at current position
+        fillGrid(x, y, square_size, square_size);
+        
+        // Simple delay loop to slow down animation
+        delay = 0;
+        while (delay < delay_max) {
+            delay = delay + 1;
+        }
+        
+        // Update position
+        x = x + dx;
+        y = y + dy;
+        
+        // Check for bouncing off walls
+        // Right wall collision
+        if (x + square_size >= screen_width) {
+            dx = dx * -1;  // Reverse X direction
+            x = screen_width - square_size - 1;  // Keep square on screen
+        }
+        // Left wall collision
+        else if (x <= 1) {
+            dx = dx * -1;   // Reverse X direction
+            x = 1;    // Keep square on screen
+        }
+
+        // Bottom wall collision
+        if (y + square_size > screen_height) {
+            dy = dy * -1;  // Reverse Y direction
+            y = screen_height - square_size ;  // Keep square on screen
+        }
+        // Top wall collision
+        else if (y <= 0) {
+            dy = dy * -1;   // Reverse Y direction
+            y = 0;    // Keep square on screen
+        }
+    }
+    
+    return 0;
+}

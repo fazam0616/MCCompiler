@@ -1,7 +1,7 @@
 // Test program for KEYIN instruction and 16-bit system
 // This program demonstrates the new features
 
-function main() -> int {
+function main() {
     var buffer_addr: int = 0x1000;  // Input buffer address
     var char1: int;
     var char2: int;
@@ -22,7 +22,7 @@ function main() -> int {
 }
 
 // Function to demonstrate 16-bit arithmetic bounds
-function test_16bit_limits() -> int {
+function test_16bit_limits() {
     var max_val: int = 65535;  // Maximum 16-bit value
     var overflow: int;
     
@@ -33,7 +33,7 @@ function test_16bit_limits() -> int {
 }
 
 // Function to demonstrate array operations with 16-bit addressing
-function test_array_ops() -> int {
+function test_array_ops() {
     var base_addr: int = 0x2000;
     var index: int = 5;
     var element_addr: int;

@@ -2,14 +2,17 @@
 """
 
 import unittest
-import tempfile
-import os
 from pathlib import Path
+import sys
+import os
+
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 
 from src.compiler.lexer import tokenize, LexerError
 from src.compiler.parser import parse, ParseError
-from src.compiler.assembly_generator import generate_assembly, CodeGenerationError
-
+from src.compiler.assembly_generator import generate_assembly
 
 class TestBasicCompilation(unittest.TestCase):
     """Test basic compilation pipeline."""

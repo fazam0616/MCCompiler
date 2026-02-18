@@ -534,11 +534,16 @@ class CPU:
         if b == 0:
             raise CPUException("Division by zero")
         
-        quotient = a // b
-        remainder = a % b
+        # Sign-extend 16-bit two's complement values to Python integers
+        a_signed = a if a < 32768 else a - 65536
+        b_signed = b if b < 32768 else b - 65536
         
-        self.set_register(self.RETURN_VALUE_REG, quotient)
-        self.set_register(self.SECONDARY_RETURN_REG, remainder)
+        # Use truncating (C-style) signed integer division
+        quotient = int(a_signed / b_signed)
+        remainder = a_signed - quotient * b_signed
+        
+        self.set_register(self.RETURN_VALUE_REG, quotient & 0xFFFF)
+        self.set_register(self.SECONDARY_RETURN_REG, remainder & 0xFFFF)
     
     def _exec_shl(self, instr: Instruction) -> None:
         """SHL A, B - Shift A left by B bits"""
@@ -672,12 +677,13 @@ class CPU:
         self.pc = target
     
     def _exec_jal(self, instr: Instruction) -> None:
-        """JAL A - Jump to address A and store current PC in reserved register"""
+        """JAL A - Jump to address A and store return address (PC+1) in R2"""
         if len(instr.operands) != 1:
             raise InvalidInstructionException("JAL requires 1 operand")
         
-        # Store return address (next instruction)
-        self.set_register(self.SECONDARY_RETURN_REG, self.pc + 1)
+        # Store return address (next instruction) in R2 (return address register)
+        # Use R2 instead of SECONDARY_RETURN_REG to avoid conflict with MULT/DIV
+        self.set_register(2, self.pc + 1)
         
         target = self._resolve_operand(instr.operands[0])
         self.pc = target

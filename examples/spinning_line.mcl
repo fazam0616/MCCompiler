@@ -1,0 +1,70 @@
+// Spinning Line Demo (MCL)
+// Draws a line from the center of the screen to the edge,
+// sweeping around like a radar/clock hand.
+
+var scalar: int = 100;
+
+// Bhaskara I quadratic approximation: sin(x)*100 ≈ x*(180-x)/81 for x in [0,180]
+// Max intermediate value: 90*90 = 8100, well within 16-bit range.
+function sin_deg(angle: int) {
+    var a: int = angle % 360;
+    if (a < 0) { a = a + 360; }
+    var b: int = 0;
+    var p: int = 0;
+    var result: int = 0;
+    if (a <= 180) {
+        p = a * (180 - a);
+        result = p / 81;
+    } else {
+        b = a - 180;
+        p = b * (180 - b);
+        result = 0 - (p / 81);
+    }
+    return result;
+}
+
+function cos_deg(angle: int) {
+    return sin_deg(angle + 90);
+}
+
+// Draws a line, always passing the vertically higher point (smaller y) first
+function drawLineOrdered(x1: int, y1: int, x2: int, y2: int) {
+    if (y1 <= y2) {
+        drawLine(x1, y1, x2, y2);
+    } else {
+        drawLine(x2, y2, x1, y1);
+    }
+}
+
+function main() {
+    // Screen center and line radius (in pixels)
+    var cx: int = 15;
+    var cy: int = 15;
+    var radius: int = 10;
+
+    var angle: int = 0;
+    var ex: int;
+    var ey: int;
+    var frame: int = 0;
+
+    while (1) {
+        // Compute tip of the line using trig
+        // ex = cx + radius * cos(angle) / scalar
+        // ey = cy + radius * sin(angle) / scalar
+        ex = cx + radius * cos_deg(angle) / scalar;
+        ey = cy + radius * sin_deg(angle) / scalar;
+
+        // Swap buffers
+        frame = frame ^ 1;
+        setGPUBuffer(0, frame);
+        setGPUBuffer(1, frame ^ 1);
+
+        // Clear screen and draw the line from centre to tip
+        clearGrid(0, 0, 32, 32);
+        drawLineOrdered(cx, cy, ex, ey);
+
+        // Advance 6 degrees per frame (one full revolution = 60 frames)
+        angle = (angle + 6) % 360;
+    }
+    return 0;
+}

@@ -74,6 +74,7 @@ class VirtualMachine:
         # CPU speed control
         self.cpu_speed = 1.0  # Instructions per second (0.1 to 1000.0)
         self.last_execution_time = 0
+        self.highspeed_mode = True  # Default: run as fast as possible
         
         # Statistics
         self.start_time: Optional[float] = None
@@ -90,12 +91,9 @@ class VirtualMachine:
             # self.reset()
             self.memory.load_program(instructions, labels)
             self.cpu.set_labels(self.memory.labels)
-            # Set PC to func_main or main if present
-            if hasattr(self.memory, 'labels'):
-                if 'func_main' in self.memory.labels:
-                    self.cpu.pc = self.memory.labels['func_main']
-                elif 'main' in self.memory.labels:
-                    self.cpu.pc = self.memory.labels['main']
+            # Start execution at PC=0 (initialization code)
+            # The initialization code will JMP to func_main
+            self.cpu.pc = 0
         except Exception as e:
             raise VMException(f"Failed to load program '{filename}': {e}")
     
@@ -111,12 +109,9 @@ class VirtualMachine:
             self.memory.load_program(instructions, labels)
             self.cpu.set_labels(self.memory.labels)
 
-            # Set PC to func_main or main if present
-            if hasattr(self.memory, 'labels'):
-                if 'func_main' in self.memory.labels:
-                    self.cpu.pc = self.memory.labels['func_main']
-                elif 'main' in self.memory.labels:
-                    self.cpu.pc = self.memory.labels['main']
+            # Start execution at PC=0 (initialization code)
+            # The initialization code will JMP to func_main
+            self.cpu.pc = 0
         except Exception as e:
             raise VMException(f"Failed to load program: {e}")
     
@@ -476,6 +471,7 @@ def main():
     parser.add_argument('--headless', action='store_true', help='Run without graphics')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     parser.add_argument('--scale', type=int, default=2, help='Display scale factor')
+    parser.add_argument('--paused', action='store_true', help='Start the simulator paused')
     
     args = parser.parse_args()
     
@@ -491,6 +487,21 @@ def main():
             print(f"Loading assembly file: {args.file}")
             vm.load_program(args.file)
             print("Running program...")
+            # When run from CLI, start immediately at full speed (not paused)
+            # unless --paused flag is set
+            if args.paused:
+                print("Starting paused. Press Space or use the UI to resume.")
+                vm.paused = True
+                if vm.gpu:
+                    vm.gpu.cpu_paused = True
+                    vm.gpu.highspeed_mode = True  # Speed is still full when unpaused
+            else:
+                vm.paused = False
+                vm.highspeed_mode = True
+                # Sync GPU UI state so play/highspeed buttons show correct state
+                if vm.gpu:
+                    vm.gpu.cpu_paused = False
+                    vm.gpu.highspeed_mode = True
             vm.start()
             
             # Shutdown cleanly

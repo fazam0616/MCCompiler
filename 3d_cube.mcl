@@ -1,0 +1,185 @@
+// Rotating 3D Cube Demo (MCL)
+// Renders with dual GPU buffers
+
+var scalar: int = 128; // scale for sine/cosine approximation
+
+// Bhaskara I quadratic approximation: sin(x)*100 ≈ x*(180-x)/81 for x in [0,180]
+// Max intermediate value: 90*90 = 8100, well within 16-bit range.
+function sin_deg(angle: int) {
+    var a: int = angle % 360;
+    if (a < 0) { a = a + 360; }
+    var b: int = 0;
+    var p: int = 0;
+    var result: int = 0;
+    if (a <= 180) {
+        p = a * (180 - a);
+        result = p / 81;
+    } else {
+        b = a - 180;
+        p = b * (180 - b);
+        result = 0 - (p / 81);
+    }
+    return result;
+}
+
+// Cosine via sine
+function cos_deg(angle: int) {
+    return sin_deg(angle + 90);
+}
+
+// Draws a line, always passing the vertically higher point (smaller y) first
+function drawLineOrdered(x1: int, y1: int, x2: int, y2: int) {
+    if (y1 <= y2) {
+        drawLine(x1, y1, x2, y2);
+    } else {
+        drawLine(x2, y2, x1, y1);
+    }
+}
+
+// Draw up to 3-digit number at (x,y) using text slots 0-2
+// Digit char codes: '0'=26 .. '9'=35
+function drawNumber(n: int, x: int, y: int) {
+    var d0: int;
+    var d1: int;
+    var d2: int;
+    var v: int = n;
+    if (v < 0) { v = 0; }
+    d2 = v % 10;          // ones
+    v = v / 10;
+    d1 = v % 10;          // tens
+    v = v / 10;
+    d0 = v % 10;          // hundreds
+    loadText(0, d0 + 26);
+    loadText(1, d1 + 26);
+    loadText(2, d2 + 26);
+    drawText(0, x,     y);
+    drawText(1, x + 4, y);
+    drawText(2, x + 8, y);
+}
+
+function main() {
+    // Cube vertex data: 8 points (x, y, z)
+    // Vertices at ±50 so that trig*50/100 gives ±0..50 (not truncated to 0)
+    // Projected to screen as 16 + coord/4 keeping within ±12 of centre
+    var cube_src: int[24] = {
+        -50, -50, -50,   // 0
+         50, -50, -50,   // 1
+         50,  50, -50,   // 2
+        -50,  50, -50,   // 3
+        -50, -50,  50,   // 4
+         50, -50,  50,   // 5
+         50,  50,  50,   // 6
+        -50,  50,  50    // 7
+    };
+    // Transformed points
+    var cube_dst: int[24];
+    // Edge list: pairs of vertex indices
+    var edges: int[24] = {
+        0,1, 1,2, 2,3, 3,0, // bottom
+        4,5, 5,6, 6,7, 7,4, // top
+        0,4, 1,5, 2,6, 3,7  // verticals
+    };
+
+    var yaw: int = 0;
+    var pitch: int = 0;
+    var roll: int = 0;
+    var frame: int = 0;
+    var frame_count: int = 0;
+    var i: int;
+    var j: int;
+    var k: int;
+    var x: int;
+    var y: int;
+    var z: int;
+    var tx: int;
+    var ty: int;
+    var tz: int;
+    var sx: int;
+    var sy: int;
+    var sz: int;
+    var px: int;
+    var py: int;
+    var pz: int;
+    var sin_yaw: int;
+    var cos_yaw: int;
+    var sin_pitch: int;
+    var cos_pitch: int;
+    var sin_roll: int;
+    var cos_roll: int;
+
+
+
+    // Main loop
+    while (1) {
+        // Update angles
+        yaw = (yaw + 5) % 360;    // Fastest
+        pitch = (pitch + 3) % 360;
+        roll = (roll + 1) % 360;  // Slowest
+
+        // Precompute sin/cos for all axes
+        sin_yaw = sin_deg(yaw);
+        cos_yaw = cos_deg(yaw);
+        sin_pitch = sin_deg(pitch);
+        cos_pitch = cos_deg(pitch);
+        sin_roll = sin_deg(roll);
+        cos_roll = cos_deg(roll);
+
+        // Transform all cube points
+        for (i = 0; i < 8; i = i + 1) {
+            // Load source point
+            x = cube_src[i*3 + 0];
+            y = cube_src[i*3 + 1];
+            z = cube_src[i*3 + 2];
+
+            // Yaw (Y axis)
+            tx = (x * cos_yaw - z * sin_yaw) / scalar;
+            tz = (x * sin_yaw + z * cos_yaw) / scalar;
+            x = tx;
+            z = tz;
+
+            // Pitch (X axis)
+            ty = (y * cos_pitch - z * sin_pitch) / scalar;
+            tz = (y * sin_pitch + z * cos_pitch) / scalar;
+            y = ty;
+            z = tz;
+
+            // Roll (Z axis)
+            tx = (x * cos_roll - y * sin_roll) / scalar;
+            ty = (x * sin_roll + y * cos_roll) / scalar;
+            x = tx;
+            y = ty;
+
+            // Store transformed point
+            cube_dst[i*3 + 0] = x;
+            cube_dst[i*3 + 1] = y;
+            cube_dst[i*3 + 2] = z;
+        }
+
+        // Swap buffers: draw to edit buffer, display other
+        frame = frame ^ 1;
+        setGPUBuffer(0, frame);      // Set edit buffer
+        setGPUBuffer(1, frame ^ 1);  // Set display buffer
+
+        // Clear screen
+        clearGrid(0, 0, 32, 32);
+
+        // Project and draw edges
+        // Divide by 4 to map ±50 cube coords into ±12 screen pixels around centre 16
+        for (i = 0; i < 12; i = i + 1) {
+            // Get edge vertices
+            j = edges[i*2 + 0];
+            k = edges[i*2 + 1];
+            sx = cube_dst[j*3 + 0] / 4;
+            sy = cube_dst[j*3 + 1] / 4;
+            px = cube_dst[k*3 + 0] / 4;
+            py = cube_dst[k*3 + 1] / 4;
+            drawLineOrdered(16 + sx, 16 + sy, 16 + px, 16 + py);
+        }
+
+        // Frame counter in top-left (slots 0-2)
+        drawNumber(frame_count, 0, 0);
+        frame_count = frame_count + 1;
+        if (frame_count > 999) { frame_count = 0; }
+    }
+    return 0;
+}

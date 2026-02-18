@@ -23,12 +23,13 @@ class StorageLocation(Enum):
     REGISTER = "register"
     RAM = "ram"
     SPILLED = "spilled"  # Register value stored in RAM temporarily
+    STACK = "stack"    # Value in stack frame, accessed via FP-relative offset
 
 
 @dataclass
 class Symbol:
     """Represents a symbol in the symbol table."""
-    name: str
+    name: str  # Original user-facing name
     symbol_type: Type
     kind: SymbolKind
     storage_location: StorageLocation = StorageLocation.REGISTER
@@ -38,12 +39,19 @@ class Symbol:
     is_live: bool = True  # Whether symbol is currently needed
     line: int = 0
     column: int = 0
+    scoped_name: Optional[str] = None  # Internal scoped name for register allocation
+    scope_level: int = 0  # Scope depth level
+    scope_id: int = 0  # Unique scope identifier
+    frame_offset: Optional[int] = None  # FP-relative offset for STACK storage
     
     def is_in_register(self) -> bool:
         return self.storage_location == StorageLocation.REGISTER
     
     def is_in_ram(self) -> bool:
         return self.storage_location in [StorageLocation.RAM, StorageLocation.SPILLED]
+    
+    def is_on_stack(self) -> bool:
+        return self.storage_location == StorageLocation.STACK
 
 
 @dataclass
@@ -70,12 +78,14 @@ class MemorySegment:
 class Scope:
     """Represents a lexical scope with register allocation tracking."""
     
-    def __init__(self, parent: Optional['Scope'] = None, register_allocator: Optional['RegisterAllocator'] = None):
+    def __init__(self, parent: Optional['Scope'] = None, register_allocator: Optional['RegisterAllocator'] = None, scope_id: int = 0):
         self.parent = parent
         self.symbols: Dict[str, Symbol] = {}
         self.register_allocator = register_allocator
         self.live_symbols: Set[str] = set()  # Symbols needed in this scope
         self.scope_registers: Dict[str, int] = {}  # Registers allocated for this scope
+        self.scope_id = scope_id  # Unique identifier for this scope
+        self.level = 0 if parent is None else parent.level + 1  # Depth level
     
     def define(self, symbol: Symbol, register_allocator: 'RegisterAllocator') -> None:
         """Define a symbol in this scope."""
@@ -344,7 +354,7 @@ class SymbolTable:
         self.memory_manager = MemoryManager(ram_start, ram_size)
         self.register_allocator = RegisterAllocator(self.memory_manager, self)
         
-        self.global_scope = Scope(register_allocator=self.register_allocator)
+        self.global_scope = Scope(register_allocator=self.register_allocator, scope_id=0)
         self.current_scope = self.global_scope
         
         # Track global memory allocation
@@ -352,10 +362,18 @@ class SymbolTable:
 
         # Expression scope stack for temporary register management
         self.expression_scope_stack: List[Set[int]] = []
+        
+        # Scope ID counter for generating unique scope identifiers
+        self.next_scope_id = 1
+        
+        # Function depth tracking for recursion
+        self.current_function_name = None
+        self.function_call_depth: Dict[str, int] = {}  # function_name -> current depth
     
     def enter_scope(self) -> None:
         """Enter a new scope."""
-        new_scope = Scope(self.current_scope, self.register_allocator)
+        new_scope = Scope(self.current_scope, self.register_allocator, self.next_scope_id)
+        self.next_scope_id += 1
         new_scope.enter_scope(self.register_allocator)
         self.current_scope = new_scope
     
@@ -367,15 +385,29 @@ class SymbolTable:
         else:
             raise SymbolError("Cannot exit global scope")
     
+    def _create_scoped_name(self, name: str) -> str:
+        """Create a scoped name for a symbol to ensure unique register allocation.
+        
+        Format: varname$scope{scope_id}$level{level}
+        This prevents variable shadowing issues and helps with recursion tracking.
+        """
+        scope_id = self.current_scope.scope_id
+        level = self.current_scope.level
+        return f"{name}$scope{scope_id}$level{level}"
+    
     def define_variable(self, name: str, var_type: Type, line: int = 0, column: int = 0) -> Symbol:
         """Define a variable with intelligent storage allocation."""
         is_global = (self.current_scope == self.global_scope)
+        
+        # Create scoped name for register allocation
+        # Format: varname$scope{scope_id}$level{level}
+        scoped_name = self._create_scoped_name(name)
         
         # Determine storage requirements
         if isinstance(var_type, ArrayType):
             # Arrays always go to RAM
             size = var_type.size if hasattr(var_type, 'size') else 10  # Default size
-            ram_addr = self.memory_manager.allocate_memory(name, size)
+            ram_addr = self.memory_manager.allocate_memory(scoped_name, size)
             if ram_addr is None:
                 raise SymbolError(f"Cannot allocate RAM for array {name}")
             
@@ -388,13 +420,16 @@ class SymbolTable:
                 size=size,
                 is_global=is_global,
                 line=line,
-                column=column
+                column=column,
+                scoped_name=scoped_name,
+                scope_level=self.current_scope.level,
+                scope_id=self.current_scope.scope_id
             )
         else:
             # Regular variables - try register first
             if is_global:
                 # Global variables go to RAM
-                ram_addr = self.memory_manager.allocate_memory(name, 1)
+                ram_addr = self.memory_manager.allocate_memory(scoped_name, 1)
                 if ram_addr is None:
                     raise SymbolError(f"Cannot allocate RAM for global variable {name}")
                 
@@ -407,11 +442,14 @@ class SymbolTable:
                     size=1,
                     is_global=True,
                     line=line,
-                    column=column
+                    column=column,
+                    scoped_name=scoped_name,
+                    scope_level=self.current_scope.level,
+                    scope_id=self.current_scope.scope_id
                 )
             else:
-                # Local variables - try register allocation
-                reg = self.register_allocator.allocate_register_for_symbol(name, False)
+                # Local variables - try register allocation using scoped name
+                reg = self.register_allocator.allocate_register_for_symbol(scoped_name, False)
                 if reg is not None:
                     symbol = Symbol(
                         name=name,
@@ -422,11 +460,14 @@ class SymbolTable:
                         size=1,
                         is_global=False,
                         line=line,
-                        column=column
+                        column=column,
+                        scoped_name=scoped_name,
+                        scope_level=self.current_scope.level,
+                        scope_id=self.current_scope.scope_id
                     )
                 else:
                     # Fall back to RAM if no registers available
-                    ram_addr = self.memory_manager.allocate_memory(name, 1)
+                    ram_addr = self.memory_manager.allocate_memory(scoped_name, 1)
                     if ram_addr is None:
                         raise SymbolError(f"Cannot allocate storage for variable {name}")
                     
@@ -439,7 +480,10 @@ class SymbolTable:
                         size=1,
                         is_global=False,
                         line=line,
-                        column=column
+                        column=column,
+                        scoped_name=scoped_name,
+                        scope_level=self.current_scope.level,
+                        scope_id=self.current_scope.scope_id
                     )
         
         self.current_scope.define(symbol, self.register_allocator)
@@ -455,7 +499,10 @@ class SymbolTable:
             address=None,  # Will be resolved during assembly
             is_global=True,
             line=line,
-            column=column
+            column=column,
+            scoped_name=name,  # Functions use their original name
+            scope_level=0,
+            scope_id=0
         )
         
         self.global_scope.define(symbol, self.register_allocator)
@@ -463,7 +510,10 @@ class SymbolTable:
     
     def define_parameter(self, name: str, param_type: Type, line: int = 0, column: int = 0) -> Symbol:
         """Define a function parameter."""
-        reg = self.register_allocator.allocate_register_for_symbol(name, True)
+        # Create scoped name for parameter
+        scoped_name = self._create_scoped_name(name)
+        
+        reg = self.register_allocator.allocate_register_for_symbol(scoped_name, True)
         if reg is None:
             raise SymbolError(f"Cannot allocate register for parameter {name}")
         
@@ -475,7 +525,10 @@ class SymbolTable:
             address=reg,
             is_global=False,
             line=line,
-            column=column
+            column=column,
+            scoped_name=scoped_name,
+            scope_level=self.current_scope.level,
+            scope_id=self.current_scope.scope_id
         )
         
         self.current_scope.define(symbol, self.register_allocator)
@@ -522,6 +575,48 @@ class SymbolTable:
         # Also exit the register allocation scope
         self.register_allocator.exit_register_scope()
     
+    def define_variable_on_stack(self, name: str, var_type: Type, frame_offset: int,
+                                   line: int = 0, column: int = 0) -> Symbol:
+        """Define a local variable stored in the current stack frame."""
+        scoped_name = self._create_scoped_name(name)
+        symbol = Symbol(
+            name=name,
+            symbol_type=var_type,
+            kind=SymbolKind.VARIABLE,
+            storage_location=StorageLocation.STACK,
+            address=None,
+            frame_offset=frame_offset,
+            is_global=False,
+            line=line,
+            column=column,
+            scoped_name=scoped_name,
+            scope_level=self.current_scope.level,
+            scope_id=self.current_scope.scope_id
+        )
+        self.current_scope.define(symbol, self.register_allocator)
+        return symbol
+
+    def define_parameter_on_stack(self, name: str, param_type: Type, frame_offset: int,
+                                    line: int = 0, column: int = 0) -> Symbol:
+        """Define a function parameter stored in the current stack frame."""
+        scoped_name = self._create_scoped_name(name)
+        symbol = Symbol(
+            name=name,
+            symbol_type=param_type,
+            kind=SymbolKind.PARAMETER,
+            storage_location=StorageLocation.STACK,
+            address=None,
+            frame_offset=frame_offset,
+            is_global=False,
+            line=line,
+            column=column,
+            scoped_name=scoped_name,
+            scope_level=self.current_scope.level,
+            scope_id=self.current_scope.scope_id
+        )
+        self.current_scope.define(symbol, self.register_allocator)
+        return symbol
+
     def get_memory_stats(self) -> Dict[str, any]:
         """Get comprehensive memory usage statistics."""
         return {
@@ -537,10 +632,11 @@ class RegisterAllocator:
         self.memory_manager = memory_manager
         
         # Register allocation strategy
-        self.ALU_REGISTERS = {0, 1}  # R0, R1 for ALU operations
-        self.PARAM_START = 2  # R2, R3, ... for function parameters (including return address)
+        self.ALU_REGISTERS = {0, 1}  # R0, R1 for ALU operations  
+        self.PARAM_START = 6  # R6+ for temporaries (R2=ret addr, R3=SP, R4=FP, R5=epilogue-save)
         self.LOCAL_START = 31  # R31, R30, R29, ... for local calculations
         self.MAX_REGISTERS = 32
+        self.RESERVED_REGISTERS = {0, 1, 2, 3, 4, 5}  # Never allocate these
         
         # Track register usage
         self.register_to_symbol = {}  # reg -> symbol name
@@ -561,8 +657,8 @@ class RegisterAllocator:
         # Each scope has a set of available registers
         self.register_availability_stack = []
         
-        # Initialize with all allocatable registers (excluding ALU registers)
-        initial_available = set(range(self.PARAM_START, self.MAX_REGISTERS)) - self.ALU_REGISTERS
+        # Initialize with all allocatable registers (excluding reserved registers)
+        initial_available = set(range(self.PARAM_START, self.MAX_REGISTERS)) - self.RESERVED_REGISTERS
         self.register_availability_stack.append(initial_available)
         
         # Maps register -> scope depth where it was allocated
@@ -619,28 +715,30 @@ class RegisterAllocator:
             # Create a unique temporary symbol name
             temp_name = f"__temp_{self.temp_register_counter}"
             self.temp_register_counter += 1
-            
+
             # Track as temporary register
             self.temporary_registers.add(reg)
             self._assign_register_to_symbol(reg, temp_name)
-            
+
             # Mark as used in current scope
             self.mark_register_used(reg)
-            
+
             # Track scope depth
             self.register_scope_depth[reg] = len(self.register_availability_stack) - 1
-            
+
             return reg
-        
+
         # Spill least recently used register
         return self._spill_lru_and_allocate()
     
     def free_temporary_register(self, register: int) -> None:
         """Free a temporary register."""
         if register in self.temporary_registers:
+            # Unmark live first so the slot is fully available for reuse.
+            self.mark_register_consumed(register)
             self.temporary_registers.remove(register)
             self._free_register_internal(register, True)
-            
+
             # Allow the register to be reused by moving the counter back if appropriate
             # Only reset if this register is higher than the current counter
             if register > self.next_local_register:
@@ -678,30 +776,34 @@ class RegisterAllocator:
         symbol: Optional[Symbol] = None
         if self.symbol_table:
             symbol = self.symbol_table.current_scope.resolve(symbol_name)
+        
+        # Use scoped name for register lookups if available
+        lookup_name = symbol.scoped_name if symbol and symbol.scoped_name else symbol_name
 
         # If in register, update usage and return
-        if symbol_name in self.symbol_to_register:
-            reg = self.symbol_to_register[symbol_name]
+        if lookup_name in self.symbol_to_register:
+            reg = self.symbol_to_register[lookup_name]
             self.register_usage_count[reg] = self.register_usage_count.get(reg, 0) + 1
             return reg
 
         # If spilled, need to load back into register
-        if symbol_name in self.spilled_symbols or (symbol and symbol.is_in_ram()):
-            reg = self.allocate_register_for_symbol(symbol_name, False)
+        if lookup_name in self.spilled_symbols or (symbol and symbol.is_in_ram()):
+            reg = self.allocate_register_for_symbol(lookup_name, False)
             if reg is None:
                 raise RuntimeError(f"Cannot allocate register for spilled symbol {symbol_name}")
             if (symbol and symbol.is_in_ram()):
                 ram_addr = symbol.address
             else:
-                ram_addr = self.spilled_symbols[symbol_name]
+                ram_addr = self.spilled_symbols[lookup_name]
                 print(f"Reloading spilled symbol {symbol_name} from RAM address {ram_addr} into register R{reg}")
             if hasattr(self, '_emit_callback') and self._emit_callback:
-                self._emit_callback('READ', ram_addr, reg, comment=f"Reload {symbol_name} from RAM")
-            self._assign_register_to_symbol(reg, symbol_name)
+                self._emit_callback('READ', f'i:{ram_addr}', reg, comment=f"Reload {symbol_name} from RAM")
+            self._assign_register_to_symbol(reg, lookup_name)
             self.mark_register_used(reg)
             self.register_scope_depth[reg] = len(self.register_availability_stack) - 1
-            self.mark_register_live(reg, symbol_name)
-            del self.spilled_symbols[symbol_name]
+            self.mark_register_live(reg, lookup_name)
+            if lookup_name in self.spilled_symbols:
+                del self.spilled_symbols[lookup_name]
             return reg
 
         raise RuntimeError(f"Symbol {symbol_name} not found in registers, spilled memory, or RAM")
@@ -724,11 +826,14 @@ class RegisterAllocator:
             return False
         print(f"Spilling symbol {symbol_name} from register R{reg} to RAM address {ram_addr}")
 
-        # Emit LOAD instruction: LOAD reg, ram_addr
+        # Emit LOAD instruction: LOAD reg, i:ram_addr
         if hasattr(self, '_emit_callback') and self._emit_callback:
-            self._emit_callback('LOAD', reg, ram_addr, comment=f"Spill {symbol_name} to RAM")
+            self._emit_callback('LOAD', reg, f'i:{ram_addr}', comment=f"Spill {symbol_name} to RAM")
 
         self.spilled_symbols[symbol_name] = ram_addr
+        # If this was a temporary register, remove it from temporary_registers so
+        # the slot is fully reclaimed and future spill passes can see it as free.
+        self.temporary_registers.discard(reg)
         self.free_register(reg)
         return True
     
@@ -743,9 +848,10 @@ class RegisterAllocator:
         return result
     
     def _allocate_parameter_register(self) -> Optional[int]:
-        """Allocate a parameter register (R2, R3, ...)."""
+        """Allocate a parameter register (R6+)."""
         while self.next_param_register < self.LOCAL_START:
-            if self.next_param_register not in self.register_to_symbol:
+            if (self.next_param_register not in self.register_to_symbol and
+                    self.next_param_register not in self.RESERVED_REGISTERS):
                 reg = self.next_param_register
                 self.next_param_register += 1
                 return reg
@@ -753,12 +859,12 @@ class RegisterAllocator:
         return None
     
     def _allocate_local_register(self) -> Optional[int]:
-        """Allocate a local register (R31, R30, R29, ...)."""
+        """Allocate a local register (R31, R30, R29, ..., R6)."""
         available = self.get_available_registers()
         
         while self.next_local_register >= self.PARAM_START:
             if (self.next_local_register not in self.register_to_symbol and 
-                self.next_local_register not in self.ALU_REGISTERS and
+                self.next_local_register not in self.RESERVED_REGISTERS and
                 self.next_local_register in available and
                 not self.is_register_live(self.next_local_register)):
                 reg = self.next_local_register
@@ -819,14 +925,20 @@ class RegisterAllocator:
         return lru_reg
     
     def _spill_lru_and_allocate(self) -> Optional[int]:
-        """Spill LRU register for temporary allocation."""
-        # Find LRU register that is NOT live
+        """Spill LRU register for temporary allocation.
+
+        All in-use temporary registers are marked live by
+        allocate_temporary_register(), so only non-live named-variable
+        registers are eligible for eviction here.
+        """
         lru_reg = None
         min_usage = float('inf')
-        
+
+        # Single pass: find LRU non-live, non-ALU register with a symbol.
         for reg in range(self.LOCAL_START, self.PARAM_START, -1):
-            if (
-                reg not in self.ALU_REGISTERS ):
+            if (reg not in self.ALU_REGISTERS
+                    and not self.is_register_live(reg)
+                    and reg in self.register_to_symbol):
                 usage = self.register_usage_count.get(reg, 0)
                 if usage < min_usage:
                     min_usage = usage
@@ -834,6 +946,9 @@ class RegisterAllocator:
         
         if lru_reg is None:
             print(' ' * (len(self.symbol_table.expression_scope_stack)) + "No non-live registers available to spill")
+            print(f"  TEMP_REGS ({len(self.temporary_registers)}): {sorted(self.temporary_registers)}")
+            print(f"  LIVE_REGS ({len(self.live_registers)}): {sorted(self.live_registers)}")
+            print(f"  REG2SYM: {dict(sorted(self.register_to_symbol.items()))}")
             # No non-live registers available to spill
             # This is a critical situation - we might need to spill a live register
             # or increase the number of available registers
@@ -845,18 +960,18 @@ class RegisterAllocator:
             lru_symbol = self.register_to_symbol[lru_reg]
             if not self.spill_symbol(lru_symbol):
                 return None
-        
+
         temp_name = f"__temp_{self.temp_register_counter}"
         self.temp_register_counter += 1
-        
+
         self._assign_register_to_symbol(lru_reg, temp_name)
         self.temporary_registers.add(lru_reg)
-        
+
         self.mark_register_used(lru_reg)
-        
+
         # Track scope depth
         self.register_scope_depth[lru_reg] = len(self.register_availability_stack) - 1
-        
+
         return lru_reg
     
     def get_return_register(self) -> int:
@@ -893,7 +1008,13 @@ class RegisterAllocator:
         ]
         
         for reg in registers_to_free:
-            self._free_register_internal(reg, True)
+            # Only free registers that are not still live (i.e. not currently
+            # in active use by codegen).  Live registers were allocated inside
+            # this scope but are being returned as results to the parent scope —
+            # forcibly consuming them here would create dangling register refs.
+            if not self.is_register_live(reg):
+                self.temporary_registers.discard(reg)
+                self._free_register_internal(reg, True)
         
         # # Clean up spilled symbols that were spilled at this scope depth
         # # (This prevents memory leaks of spilled data that's no longer needed)
@@ -961,7 +1082,92 @@ class RegisterAllocator:
     def is_register_live(self, register: int) -> bool:
         """Check if a register contains a live value."""
         return register in self.live_registers
-    
+
+    # ------------------------------------------------------------------
+    # Convenience helpers (consolidate repeated patterns from codegen)
+    # ------------------------------------------------------------------
+
+    def free_temporaries(self, *registers) -> None:
+        """Free multiple temporary registers in one call.
+
+        Accepts individual register numbers or iterables of register numbers.
+        Skips None values so callers can pass optional regs unconditionally.
+
+        Example::
+
+            ra.free_temporaries(left_reg, right_reg, extra_reg)
+        """
+        for item in registers:
+            if item is None:
+                continue
+            try:
+                # An integer register number
+                for reg in item:          # works if item is iterable
+                    if reg is not None:
+                        self.free_temporary_register(reg)
+            except TypeError:
+                self.free_temporary_register(item)  # scalar int
+
+    def save_alu_result(self, pin_live: bool = False) -> int:
+        """Allocate a fresh temporary, emit ``MVR 0 temp``, and return it.
+
+        When *pin_live* is True the returned register is immediately marked
+        live so the allocator cannot spill or reuse it before the caller is
+        finished.  The caller is responsible for calling
+        ``mark_register_consumed(reg)`` and, when done, freeing the temp.
+
+        This consolidates the pattern::
+
+            temp = allocate_temporary()
+            emit(MVR, 0, temp, ...)
+            mark_register_live(temp)          # if pin_live
+
+        that appears every time an ALU result in R0 must survive a later
+        allocation.
+        """
+        temp = self.allocate_temporary_register()
+        if temp is None:
+            raise RuntimeError("save_alu_result: no register available")
+        # Track in expression scope so auto-free at scope exit is possible.
+        if self.symbol_table and self.symbol_table.expression_scope_stack:
+            self.symbol_table.expression_scope_stack[-1].add(temp)
+        if hasattr(self, '_emit_callback') and self._emit_callback:
+            self._emit_callback('MVR', 0, temp,
+                                comment="Save ALU result (R0) to temp")
+        if pin_live:
+            self.mark_register_live(temp)
+        return temp
+
+
+    def allocate_protected(self, *live_regs) -> int:
+        """Mark *live_regs* live, allocate a new temporary, then unmark them.
+
+        Returns the newly allocated temporary register.  The live-reg pins are
+        released immediately after allocation succeeds, so the caller still
+        owns the returned register and is responsible for freeing it.
+
+        This consolidates the triplet::
+
+            ra.mark_register_live(r1)
+            ra.mark_register_live(r2)
+            result = allocate_temporary()
+            ra.mark_register_consumed(r1)
+            ra.mark_register_consumed(r2)
+
+        that appears in MODULO, LOGICAL_AND, LOGICAL_OR, and comparisons.
+        """
+        for r in live_regs:
+            self.mark_register_live(r)
+        result = self.allocate_temporary_register()
+        for r in live_regs:
+            self.mark_register_consumed(r)
+        if result is None:
+            raise RuntimeError("allocate_protected: no register available after spill")
+        # Track in expression scope stack (mirrors SymbolTable.allocate_temporary behaviour)
+        if self.symbol_table and self.symbol_table.expression_scope_stack:
+            self.symbol_table.expression_scope_stack[-1].add(result)
+        return result
+
     def get_register_usage_stats(self) -> Dict[str, any]:
         """Get register allocation statistics."""
         return {

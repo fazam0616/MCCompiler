@@ -71,13 +71,13 @@ class TestHaltInstruction(BaseAssemblyTestCase):
         test_cases = [
             AssemblyTestCase(
                 "halt_in_subroutine",
-                "JAL subroutine\nMVR i:999, 3\nHALT\nsubroutine:\nMVR i:42, 2\nHALT",  # HALT in subroutine
-                {1: 1, 2: 42, 3: 0}  # Should not return to main
+                "JAL subroutine\nMVR i:999, 3\nHALT\nsubroutine:\nMVR i:42, 5\nHALT",  # HALT in subroutine
+                {2: 1, 5: 42, 3: 0}  # Should not return to main, return address in R2
             ),
             AssemblyTestCase(
                 "halt_after_subroutine_return",
-                "MVR i:10, 0\nJAL func\nMVR i:20, 4\nHALT\nfunc:\nMVR i:5, 3\nJMP 1",  # Return then halt
-                {0: 10, 1: 2, 3: 5, 4: 20}  # Should execute normally then halt
+                "MVR i:10, 0\nJAL func\nMVR i:20, 4\nHALT\nfunc:\nMVR i:5, 3\nJMP 2",  # Return then halt using R2
+                {0: 10, 2: 2, 3: 5, 4: 20}  # Should execute normally then halt
             )
         ]
         

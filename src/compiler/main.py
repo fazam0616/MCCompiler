@@ -8,8 +8,13 @@ import argparse
 from pathlib import Path
 from typing import Optional
 
-# Add src to path for local imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add project root and src/ to path for local imports
+_project_root = str(Path(__file__).parent.parent.parent)
+_src_dir = str(Path(__file__).parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
 
 try:
     from .lexer import tokenize, LexerError

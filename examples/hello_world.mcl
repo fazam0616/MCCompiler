@@ -1,7 +1,7 @@
 // Hello World program in MCL
 // Demonstrates basic syntax and function declaration
 
-function main() -> int {
+function main() {
     var message: int = 72;  // ASCII 'H'
     var i: int;
     var input_char: int;
@@ -17,11 +17,11 @@ function main() -> int {
     return message;
 }
 
-function add_numbers(a: int, b: int) -> int {
+function add_numbers(a: int, b: int) {
     return a + b;
 }
 
-function fibonacci(n: int) -> int {
+function fibonacci(n: int) {
     if (n <= 1) {
         return n;
     }

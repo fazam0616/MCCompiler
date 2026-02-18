@@ -1,7 +1,7 @@
 // MCL program demonstrating the KEYIN instruction
 // This shows how keyboard input works in the 16-bit system
 
-function main() -> int {
+function main() {
     var input_address: int = 0x1000;  // Memory location for input
     var result: int = 0;
     
@@ -16,7 +16,7 @@ function main() -> int {
 }
 
 // Function to demonstrate buffer processing  
-function read_multiple_chars(buffer_addr: int, count: int) -> int {
+function read_multiple_chars(buffer_addr: int, count: int) {
     var i: int;
     var total: int = 0;
     

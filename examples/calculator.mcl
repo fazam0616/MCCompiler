@@ -1,6 +1,6 @@
 // Simple calculator using switch statement
 
-function calculate(op: char, a: int, b: int) -> int {
+function calculate(op: int, a: int, b: int) {
     switch (op) {
         case '+': {
             return a + b;
@@ -23,7 +23,7 @@ function calculate(op: char, a: int, b: int) -> int {
     }
 }
 
-function main() -> int {
+function main() {
     var result1: int = calculate('+', 10, 5);  // Should be 15
     var result2: int = calculate('*', 4, 7);   // Should be 28
     var result3: int = calculate('/', 20, 4);  // Should be 5
@@ -31,14 +31,14 @@ function main() -> int {
     return result1 + result2 + result3;  // Should be 48
 }
 
-function factorial(n: int) -> int {
+function factorial(n: int) {
     if (n <= 1) {
         return 1;
     }
     return n * factorial(n - 1);
 }
 
-function power(base: int, exp: int) -> int {
+function power(base: int, exp: int) {
     var result: int = 1;
     var i: int;
     

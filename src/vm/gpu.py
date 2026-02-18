@@ -204,7 +204,11 @@ class GPU:
         
         dx = x_at_y_max - x_at_y_min
         dy = y_max - y_min
-        
+
+        # x never goes outside this range for any point on the line
+        x_bound_lo = min(x_at_y_min, x_at_y_max)
+        x_bound_hi = max(x_at_y_min, x_at_y_max)
+
         if dy == 0:
             # Horizontal line
             y_scan = y_min
@@ -214,12 +218,9 @@ class GPU:
                 self._fill_row_range(y_scan, x_start, x_end)
             return
         
-        # Per scanline
+        # Per scanline: fill the x span the line covers between this row and the next
         buffer = self.get_edit_buffer()
-        for y_scan in range(32):
-            if y_scan < y_min or y_scan > y_max:
-                continue
-                
+        for y_scan in range(y_min, y_max + 1):
             y_offset = y_scan - y_min
             
             x_numerator = dx * y_offset
@@ -229,6 +230,10 @@ class GPU:
             # Ensure proper ordering
             x_start = min(x_position, x_next)
             x_end = max(x_position, x_next)
+
+            # Clamp to the line's own x extent (prevents overshoot past endpoints)
+            x_start = max(x_bound_lo, x_start)
+            x_end = min(x_bound_hi, x_end)
             
             # Clamp to screen bounds
             x_start = max(0, min(31, x_start))
@@ -248,9 +253,10 @@ class GPU:
         width = x_end - x_start + 1
         if width <= 0:
             return
-            
-        # Create mask: 0b100000000... shifted right by width, then shifted right by x_start
-        mask = (0x80000000 >> (width - 1)) >> x_start
+
+        # Create mask: 'width' consecutive 1-bits placed at x_start..x_end
+        # (x=0 is MSB / bit 31, x=31 is LSB / bit 0)
+        mask = ((1 << width) - 1) << (32 - x_start - width)
         
         # OR the mask into the buffer
         buffer[y] |= mask

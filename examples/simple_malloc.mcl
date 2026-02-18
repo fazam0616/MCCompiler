@@ -2,4 +2,5 @@ function main() {
     int* ptr = malloc(4);
     *ptr = 42;
     free(ptr);
+    return 0;
 }

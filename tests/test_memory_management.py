@@ -2,6 +2,12 @@
 """
 
 import unittest
+import sys
+import os
+
+# Add src to path to import compiler components
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from src.compiler.lexer import tokenize
 from src.compiler.parser import parse
 from src.compiler.assembly_generator import generate_assembly

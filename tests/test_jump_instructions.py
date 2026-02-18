@@ -77,13 +77,13 @@ class TestJumpInstructions(BaseAssemblyTestCase):
         test_cases = [
             AssemblyTestCase(
                 "jal_basic_call",
-                "JAL subroutine\nMVR i:99, 3\nHALT\nsubroutine:\nMVR i:42, 2\nHALT",
-                {1: 1, 2: 42, 3: 0}  # Return address in R1, subroutine executes
+                "JAL subroutine\nMVR i:99, 3\nHALT\nsubroutine:\nMVR i:42, 5\nHALT",
+                {2: 1, 5: 42, 3: 0}  # Return address in R2, subroutine executes
             ),
             AssemblyTestCase(
                 "jal_with_return",
-                "MVR i:10, 0\nJAL func\nMVR i:20, 4\nHALT\nfunc:\nMVR i:5, 3\nJMP 1",  # Return using saved address
-                {0: 10, 1: 2, 3: 5, 4: 20}  # Should return and execute MVR i:20, 4
+                "MVR i:10, 0\nJAL func\nMVR i:20, 4\nHALT\nfunc:\nMVR i:5, 3\nJMP 2",  # Return using saved address in R2
+                {0: 10, 2: 2, 3: 5, 4: 20}  # Should return and execute MVR i:20, 4
             )
         ]
         
