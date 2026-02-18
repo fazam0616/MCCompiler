@@ -3,8 +3,9 @@
 Generates assembly code from AST nodes.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Union
+from typing import Callable, List, Dict, Optional, Union
 from enum import Enum
 from .ast_nodes import *
 from .symbol_table import SymbolTable, Symbol, SymbolKind, StorageLocation
@@ -116,6 +117,14 @@ class AssemblyGenerator(ASTVisitor):
     STACK_POINTER_REG = 3    # R3 is the stack pointer (R0,R1 for ALU, R2 for return addr)
     FRAME_POINTER_REG = 4    # R4 is the frame pointer (FP)
     EPILOGUE_SAVE_REG = 5    # R5 is used during epilogue to preserve return value across pop ops
+
+    # Binary operator → instruction type mapping (class-level constant, built once).
+    # AND/OR/XOR appear twice intentionally: the keyword forms (AND, OR, XOR) and the
+    # symbol forms (BITWISE_AND, BITWISE_OR, BITWISE_XOR) both map to the same opcode.
+    _BINARY_OP_MAP: Dict = {}   # populated in __init_subclass__ / filled below class body
+
+    # GPU function name → instruction type mapping (class-level constant, built once).
+    _GPU_FUNC_MAP: Dict = {}    # populated below class body
     
     def __init__(self, ram_start: int = 0x1000, ram_size: int = 0x1000):
         self.instructions: List[Instruction] = []
@@ -128,7 +137,86 @@ class AssemblyGenerator(ASTVisitor):
         self.current_local_frame_depth = 0  # Tracks cumulative stack frame depth for local vars
 
         self.symbol_table.register_allocator.set_emit_callback(self.emit)
-    
+
+    # ------------------------------------------------------------------
+    # Convenience helpers
+    # ------------------------------------------------------------------
+
+    def _safe_free(self, reg: Optional[int]) -> None:
+        """Free *reg* only if it is not None and not a reserved register."""
+        if reg is None:
+            return
+        ra = self.symbol_table.register_allocator
+        if reg not in ra.RESERVED_REGISTERS:
+            ra.free_temporary_register(reg)
+
+    def _emit_sp_decrement(self, n: int = 1, comment: str = None) -> None:
+        """Emit the 3-instruction sequence that decrements SP by *n*.
+        SUB SP, i:n  →  MVR 0, R1  →  MVR R1, SP
+        """
+        self.emit(InstructionType.SUB, self.STACK_POINTER_REG, Operand(n, True),
+                 comment=comment or f"Decrement SP by {n}")
+        self.emit(InstructionType.MVR, 0, 1, comment="R1 = new SP")
+        self.emit(InstructionType.MVR, 1, self.STACK_POINTER_REG, comment="SP = R1")
+
+    def _emit_sp_increment(self, n: int = 1, comment: str = None) -> None:
+        """Emit the 3-instruction sequence that increments SP by *n*.
+        ADD SP, i:n  →  MVR 0, R1  →  MVR R1, SP
+        """
+        self.emit(InstructionType.ADD, self.STACK_POINTER_REG, Operand(n, True),
+                 comment=comment or f"Increment SP by {n}")
+        self.emit(InstructionType.MVR, 0, 1, comment="R1 = new SP")
+        self.emit(InstructionType.MVR, 1, self.STACK_POINTER_REG, comment="SP = R1")
+
+    @contextmanager
+    def _expression_scope(self):
+        """Context manager that brackets enter/exit_expression_scope."""
+        self.symbol_table.enter_expression_scope()
+        try:
+            yield
+        finally:
+            self.symbol_table.exit_expression_scope()
+
+    def _rescue_r0(self, reg: int, comment: str = "Save R0 to temp") -> int:
+        """If *reg* is R0 (ALU output), copy it into a fresh temp and return
+        that temp.  Otherwise return *reg* unchanged.
+        Use this wherever the next operation might clobber R0 before the value
+        stored there has been consumed.
+        """
+        if reg != 0:
+            return reg
+        ra = self.symbol_table.register_allocator
+        temp = ra.save_alu_result(pin_live=False)
+        return temp
+
+    def _emit_array_address(self, base: Union[int, str], index_reg: int,
+                             comment: str = None, base_is_reg: bool = False) -> int:
+        """Emit code to compute *base* + *index_reg* into a fresh temp register.
+        *base* is either:
+          - an ``int`` immediate RAM address (when ``base_is_reg=False``, the default), or
+          - a register number already holding the base pointer (when ``base_is_reg=True``).
+
+        Returns the temp register that holds the computed address (R0 also
+        holds it immediately after the ADD).
+        """
+        ra = self.symbol_table.register_allocator
+        # Allocate the address register while protecting the index register so
+        # the spiller cannot evict it during the allocation.
+        addr_reg = ra.allocate_protected(index_reg) if index_reg not in ra.RESERVED_REGISTERS \
+            else self.symbol_table.allocate_temporary()
+        if not base_is_reg:
+            # base is an immediate RAM address
+            self.emit_immediate(InstructionType.MVR, base, addr_reg,
+                               comment=comment or "Base address")
+            self.emit(InstructionType.ADD, addr_reg, index_reg,
+                     comment="Add index to base")
+        else:
+            # base is already in a register — ADD writes result to R0.
+            self.emit(InstructionType.ADD, base, index_reg,
+                     comment=comment or "Add index to base")
+        self.emit(InstructionType.MVR, 0, addr_reg, comment="Save array address to temp")
+        return addr_reg
+
     def generate_label(self, prefix: str = "L") -> str:
         """Generate a unique label."""
         label = f"{prefix}{self.label_counter}"
@@ -189,28 +277,18 @@ class AssemblyGenerator(ASTVisitor):
                      comment=comment or "Push R0 (via R1) to stack")
         else:
             # General case: R0 is not the source, safe to use as scratch.
-            self.emit(InstructionType.SUB, self.STACK_POINTER_REG, Operand(1, True),
-                     comment="Decrement SP")
-            self.emit(InstructionType.MVR, 0, 1,
-                     comment="Save result to temp R1")
-            self.emit(InstructionType.MVR, 1, self.STACK_POINTER_REG,
-                     comment="Update SP")
+            self._emit_sp_decrement(comment="Decrement SP")
             self.emit(InstructionType.LOAD, source_reg, self.STACK_POINTER_REG,
                      comment=comment or "Push to stack")
     
     def _emit_pop(self, dest_reg: int, comment: str = None) -> None:
         """Pop a value from the stack into a register."""
         # Load value from current stack pointer
-        self.emit(InstructionType.READ, self.STACK_POINTER_REG, dest_reg, 
+        self.emit(InstructionType.READ, self.STACK_POINTER_REG, dest_reg,
                  comment=comment or "Pop from stack")
         # Increment stack pointer: SP + 1 -> R1 (temp), then R1 -> SP
         # Use R1 as temp to avoid clobbering R0 (return value register)
-        self.emit(InstructionType.ADD, self.STACK_POINTER_REG, Operand(1, True), 
-                 comment="Increment SP")
-        self.emit(InstructionType.MVR, 0, 1, 
-                 comment="Save result to temp R1")
-        self.emit(InstructionType.MVR, 1, self.STACK_POINTER_REG, 
-                 comment="Update SP")
+        self._emit_sp_increment(comment="Increment SP")
     
     def _emit_fp_address(self, frame_offset: int, comment: str = None) -> int:
         """Compute FP + frame_offset into a fresh temporary register and return that register.
@@ -340,14 +418,11 @@ class AssemblyGenerator(ASTVisitor):
     
     def visit_program(self, node: Program) -> None:
         """Generate code for the entire program."""
-        # Initialize stack pointer at the top of stack
         self.emit_immediate(InstructionType.MVR, self.STACK_TOP, self.STACK_POINTER_REG, 
                           comment="Initialize stack pointer")
-        # Initialize frame pointer to same value (main's frame starts here)
         self.emit_immediate(InstructionType.MVR, self.STACK_TOP, self.FRAME_POINTER_REG,
                           comment="Initialize frame pointer")
         
-        # First pass: collect function declarations
         for decl in node.declarations:
             if isinstance(decl, FunctionDeclaration):
                 func_type = FunctionType(
@@ -363,10 +438,8 @@ class AssemblyGenerator(ASTVisitor):
             if not isinstance(decl, FunctionDeclaration):
                 decl.accept(self)
         
-        # Jump to main (globals are initialized above, functions are below)
         self.emit(InstructionType.JMP, "func_main", comment="Jump to main")
         
-        # Third pass: generate function bodies
         for decl in node.declarations:
             if isinstance(decl, FunctionDeclaration):
                 decl.accept(self)
@@ -378,9 +451,7 @@ class AssemblyGenerator(ASTVisitor):
         self.current_local_frame_depth = 0
 
         # Function entry label
-        self.emit(InstructionType.MVR, 0, 0, label=f"func_{node.name}",
-                 comment=f"Function: {node.name}")
-
+        self.emit_label(f"func_{node.name}")
         # ------------------------------------------------------------------
         # PROLOGUE  (skipped for main – main is entered via JMP, not JAL)
         # Frame layout after prologue (growing downward):
@@ -392,27 +463,19 @@ class AssemblyGenerator(ASTVisitor):
         self.symbol_table.enter_scope()
 
         if node.name != "main":
-            # Save return address that JAL put in R2
             self._emit_push(2, comment="Save return address (R2) → prologue")
-            # Save caller's frame pointer
             self._emit_push(self.FRAME_POINTER_REG, comment="Save caller's FP (R4) → prologue")
-            # Point FP at the stack slot we just pushed (old FP)
             self.emit(InstructionType.MVR, self.STACK_POINTER_REG, self.FRAME_POINTER_REG,
                      comment="Set FP = SP (establish new frame)")
 
-        # Define parameters – they live in the caller's stack slots above FP
-        # (param 0 at FP+2, param 1 at FP+3, …)
         for i, param in enumerate(node.parameters):
             frame_offset = 2 + i
             self.symbol_table.define_parameter_on_stack(
                 param.name, param.param_type, frame_offset)
 
-        # Generate function body
         node.body.accept(self)
-
         self.symbol_table.exit_scope()
 
-        # Default return if the body doesn't end with an explicit return
         if not self._ends_with_return(node.body):
             self.emit_immediate(InstructionType.MVR, 0, 0, comment="Default return value = 0")
             if node.name == "main":
@@ -443,13 +506,8 @@ class AssemblyGenerator(ASTVisitor):
                 self.emit(InstructionType.LOAD, elem_reg,
                          Operand(symbol.address + i, True),
                          comment=f"Init {node.name}[{i}]")
-                if elem_reg not in ra.RESERVED_REGISTERS:
-                    ra.free_temporary_register(elem_reg)
+                self._safe_free(elem_reg)
             return
-
-        # IMPORTANT: Evaluate initializer BEFORE defining the variable so that
-        # a same-named variable in an outer scope is still visible during the
-        # initializer (e.g.  var a = a + 1  where outer 'a' should be read).
         value_reg = None
         if node.initializer:
             value_reg = node.initializer.accept(self)
@@ -477,9 +535,7 @@ class AssemblyGenerator(ASTVisitor):
                 self.emit(InstructionType.LOAD, value_reg,
                          Operand(symbol.address, True),
                          comment=f"Initialize global {node.name}")
-                ra = self.symbol_table.register_allocator
-                if value_reg not in ra.RESERVED_REGISTERS:
-                    ra.free_temporary_register(value_reg)
+                self._safe_free(value_reg)
 
         else:
             # Local scalar – lives in the current stack frame
@@ -497,31 +553,18 @@ class AssemblyGenerator(ASTVisitor):
                 self.emit(InstructionType.MVR, 0, actual_value_reg,
                          comment=f"Preserve init value of {node.name} before SP allocation")
 
-            # Allocate one stack slot (SP -= 1) without clobbering R0's new use
-            self.emit(InstructionType.SUB, self.STACK_POINTER_REG, Operand(1, True),
-                     comment=f"Alloc stack slot for {node.name} (FP{frame_offset:+d})")
-            self.emit(InstructionType.MVR, 0, 1, comment="R1 = new SP")
-            self.emit(InstructionType.MVR, 1, self.STACK_POINTER_REG, comment="SP = R1")
+            self._emit_sp_decrement(
+                comment=f"Alloc stack slot for {node.name} (FP{frame_offset:+d})")
 
             # Store initializer value if provided
             if actual_value_reg is not None:
                 stored_reg = self._emit_fp_store(actual_value_reg, frame_offset,
                                                   comment=f"Init {node.name}")
-                # _emit_fp_store copies actual_value_reg → save_reg (stored_reg) internally,
-                # then stores save_reg to RAM.  Both temporaries must be freed here.
-                self.symbol_table.register_allocator.free_temporary_register(stored_reg)
-                # Free actual_value_reg (the initializer result) — it may equal
-                # value_reg (the common case) or a separate R0-preservation temp.
+                self._safe_free(stored_reg)
                 if actual_value_reg != stored_reg:
-                    ra = self.symbol_table.register_allocator
-                    if actual_value_reg not in ra.RESERVED_REGISTERS and actual_value_reg != 0:
-                        ra.free_temporary_register(actual_value_reg)
-                # Also free the original value_reg if it differs from actual_value_reg
-                # (happens when value_reg==0 and we made a copy into actual_value_reg).
-                if value_reg is not None and value_reg != actual_value_reg and value_reg != 0:
-                    ra = self.symbol_table.register_allocator
-                    if value_reg not in ra.RESERVED_REGISTERS:
-                        ra.free_temporary_register(value_reg)
+                    self._safe_free(actual_value_reg)
+                if value_reg is not None and value_reg != actual_value_reg:
+                    self._safe_free(value_reg)
 
 
     
@@ -537,11 +580,9 @@ class AssemblyGenerator(ASTVisitor):
         # Emit cleanup for any locals declared inside this block (SP += N)
         locals_in_scope = self.current_local_frame_depth - depth_at_entry
         if locals_in_scope > 0:
-            self.emit(InstructionType.ADD, self.STACK_POINTER_REG,
-                     Operand(locals_in_scope, True),
-                     comment=f"Deallocate {locals_in_scope} local(s) on block exit")
-            self.emit(InstructionType.MVR, 0, 1, comment="R1 = new SP")
-            self.emit(InstructionType.MVR, 1, self.STACK_POINTER_REG, comment="SP = R1")
+            self._emit_sp_increment(
+                locals_in_scope,
+                comment=f"Deallocate {locals_in_scope} local(s) on block exit")
         # Restore depth so the enclosing scope can reuse those slots
         self.current_local_frame_depth = depth_at_entry
 
@@ -557,9 +598,7 @@ class AssemblyGenerator(ASTVisitor):
         result_reg = node.expression.accept(self)
         # R0 and R1 are the ALU output registers; they are not tracked by the
         # allocator and must not be freed through it.
-        ra = self.symbol_table.register_allocator
-        if result_reg is not None and result_reg not in ra.RESERVED_REGISTERS:
-            ra.free_temporary_register(result_reg)
+        self._safe_free(result_reg)
     
     def visit_if_statement(self, node: IfStatement) -> None:
         """Generate code for if statement."""
@@ -570,8 +609,7 @@ class AssemblyGenerator(ASTVisitor):
         
         # Jump to else if condition is zero
         self.emit(InstructionType.JZ, else_label, condition_reg, comment="If condition")
-        # condition_reg is consumed by the branch; free it so it doesn't
-        # occupy a register across the entire then/else body.
+        
         self.symbol_table.register_allocator.free_temporary_register(condition_reg)
         
         # Then branch
@@ -579,12 +617,12 @@ class AssemblyGenerator(ASTVisitor):
         self.emit(InstructionType.JMP, end_label, comment="Skip else")
         
         # Else branch
-        self.emit(InstructionType.MVR, 0, 0, label=else_label)
+        self.emit_label(else_label)
         if node.else_branch:
             node.else_branch.accept(self)
-        
+
         # End label
-        self.emit(InstructionType.MVR, 0, 0, label=end_label)
+        self.emit_label(end_label)
     
     def visit_while_statement(self, node: WhileStatement) -> None:
         """Generate code for while statement."""
@@ -595,14 +633,12 @@ class AssemblyGenerator(ASTVisitor):
         self.break_labels.append(end_label)
         
         # Loop start
-        self.emit(InstructionType.MVR, 0, 0, label=loop_label)
-        
+        self.emit_label(loop_label)
+
         # Check condition
         condition_reg = node.condition.accept(self)
         self.emit(InstructionType.JZ, end_label, condition_reg, comment="While condition")
-        # condition_reg is consumed by the branch; free it to reduce register
-        # pressure inside the loop body (otherwise it stays allocated for the
-        # entire loop iteration, forcing all subsequent allocations to spill).
+
         self.symbol_table.register_allocator.free_temporary_register(condition_reg)
         
         # Loop body
@@ -612,11 +648,11 @@ class AssemblyGenerator(ASTVisitor):
         self.emit(InstructionType.JMP, loop_label, comment="Loop back")
         
         # End label
-        self.emit(InstructionType.MVR, 0, 0, label=end_label)
-        
+        self.emit_label(end_label)
+
         self.continue_labels.pop()
         self.break_labels.pop()
-    
+
     def visit_for_statement(self, node: ForStatement) -> None:
         """Generate code for for statement."""
         loop_label = self.generate_label("fr_lp")
@@ -630,12 +666,11 @@ class AssemblyGenerator(ASTVisitor):
         ra = self.symbol_table.register_allocator
         if node.initializer:
             init_reg = node.initializer.accept(self)
-            if init_reg is not None and init_reg not in ra.RESERVED_REGISTERS:
-                ra.free_temporary_register(init_reg)
+            self._safe_free(init_reg)
         
         # Loop start
-        self.emit(InstructionType.MVR, 0, 0, label=loop_label)
-        
+        self.emit_label(loop_label)
+
         # Check condition
         if node.condition:
             condition_reg = node.condition.accept(self)
@@ -647,19 +682,18 @@ class AssemblyGenerator(ASTVisitor):
         node.body.accept(self)
         
         # Continue point (for continue statements)
-        self.emit(InstructionType.MVR, 0, 0, label=continue_label)
-        
+        self.emit_label(continue_label)
+
         # Increment — result register is discarded at statement level.
         if node.increment:
             inc_reg = node.increment.accept(self)
-            if inc_reg is not None and inc_reg not in ra.RESERVED_REGISTERS:
-                ra.free_temporary_register(inc_reg)
-        
+            self._safe_free(inc_reg)
+
         # Jump back to condition
         self.emit(InstructionType.JMP, loop_label, comment="For loop back")
-        
+
         # End label
-        self.emit(InstructionType.MVR, 0, 0, label=end_label)
+        self.emit_label(end_label)
         
         self.continue_labels.pop()
         self.break_labels.pop()
@@ -708,24 +742,23 @@ class AssemblyGenerator(ASTVisitor):
         case_idx = 0
         for case in node.cases:
             if case.value is None:
-                self.emit(InstructionType.MVR, 0, 0, label=default_label)
+                self.emit_label(default_label)
             else:
-                self.emit(InstructionType.MVR, 0, 0, label=case_labels[case_idx])
+                self.emit_label(case_labels[case_idx])
                 case_idx += 1
-            
+
             for stmt in case.statements:
                 stmt.accept(self)
-        
+
         # End label
-        self.emit(InstructionType.MVR, 0, 0, label=end_label)
-        
+        self.emit_label(end_label)
+
         self.break_labels.pop()
     
     def visit_return_statement(self, node: ReturnStatement) -> None:
         """Generate code for return statement."""
         if node.value:
             return_reg = node.value.accept(self)
-            # Ensure return value is in R0
             self.emit(InstructionType.MVR, return_reg, 0, comment="Set return value in R0")
         else:
             self.emit_immediate(InstructionType.MVR, 0, 0, comment="Return 0")
@@ -733,7 +766,6 @@ class AssemblyGenerator(ASTVisitor):
         if self.current_function == "main":
             self.emit(InstructionType.HALT, comment="Halt execution")
         else:
-            # Emit epilogue: saves R0 to R5, restores SP/FP/R2, returns
             self._emit_function_epilogue()
     
     def visit_break_statement(self, node: BreakStatement) -> None:
@@ -750,269 +782,241 @@ class AssemblyGenerator(ASTVisitor):
         
         self.emit(InstructionType.JMP, self.continue_labels[-1], comment="Continue")
     
+    def _emit_comparison_result(
+        self,
+        operator: 'BinaryOperator',
+        result_reg: int,
+        true_label: str,
+        end_label: str,
+    ) -> None:
+        """Emit the conditional-jump sequence for one comparison operator.
+
+        Assumes the SUB result is already in R0.  Allocates a sign-bit scratch
+        register only for the operators that need it, using allocate_protected
+        to pin result_reg during scratch allocation.
+
+        After the call the instruction stream is positioned at the fall-through
+        (false) path; ``true_label`` and ``end_label`` are emitted by the
+        caller.
+        """
+        ra = self.symbol_table.register_allocator
+        if operator == BinaryOperator.EQUALS:
+            self.emit(InstructionType.JZ, true_label, 0)
+        elif operator == BinaryOperator.NOT_EQUALS:
+            self.emit(InstructionType.JNZ, true_label, 0)
+        elif operator == BinaryOperator.LESS_THAN:
+            temp_reg = ra.allocate_protected(result_reg)
+            self.emit_immediate(InstructionType.MVR, 0x8000, temp_reg, comment="Load sign bit mask")
+            self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
+            self.emit(InstructionType.JNZ, true_label, 0, comment="Jump if negative (less than)")
+            ra.free_temporaries(temp_reg)
+        elif operator == BinaryOperator.GREATER_THAN:
+            else_label = self.generate_label("nt_grtr")
+            self.emit(InstructionType.JZ, else_label, 0, comment="Jump if equal (not greater)")
+            temp_reg = ra.allocate_protected(result_reg)
+            self.emit_immediate(InstructionType.MVR, 0x8000, temp_reg, comment="Load sign bit mask")
+            self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
+            self.emit(InstructionType.JZ, true_label, 0, comment="Jump if positive (greater than)")
+            self.emit_label(else_label)
+            ra.free_temporaries(temp_reg)
+        elif operator == BinaryOperator.LESS_EQUAL:
+            self.emit(InstructionType.JZ, true_label, 0, comment="Jump if equal")
+            temp_reg = ra.allocate_protected(result_reg)
+            self.emit_immediate(InstructionType.MVR, 0x8000, temp_reg, comment="Load sign bit mask")
+            self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
+            self.emit(InstructionType.JNZ, true_label, 0, comment="Jump if negative (less than)")
+            ra.free_temporaries(temp_reg)
+        elif operator == BinaryOperator.GREATER_EQUAL:
+            self.emit(InstructionType.JZ, true_label, 0, comment="Jump if equal")
+            temp_reg = ra.allocate_protected(result_reg)
+            self.emit_immediate(InstructionType.MVR, 0x8000, temp_reg, comment="Load sign bit mask")
+            self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
+            self.emit(InstructionType.JZ, true_label, 0, comment="Jump if positive (greater than)")
+            ra.free_temporaries(temp_reg)
+        else:
+            raise CodeGenerationError(f"Unsupported comparison operator: {operator}")
+
     def visit_binary_expression(self, node: BinaryExpression) -> int:
         """Generate code for binary expression and return result register."""
-        self.symbol_table.enter_expression_scope()
+        with self._expression_scope():
+            left_reg = node.left.accept(self)
 
-        left_reg = node.left.accept(self)
+            # Save left_reg if it could be clobbered by right operand evaluation.
+            # Both cases (R0 ALU result AND R4+ temp register) are now handled
+            # identically by pushing to the hardware stack.  This prevents register
+            # exhaustion from deep expression trees: each nesting level uses one
+            # stack slot rather than one register file slot.
+            needs_save = (left_reg == 0 or left_reg >= 4)
+            if needs_save:
+                self._emit_push(left_reg, comment="Save left operand to stack")
+                self._safe_free(left_reg)
 
-        # Save left_reg if it could be clobbered by right operand evaluation.
-        # Both cases (R0 ALU result AND R4+ temp register) are now handled
-        # identically by pushing to the hardware stack.  This prevents register
-        # exhaustion from deep expression trees: each nesting level uses one
-        # stack slot rather than one register file slot.
-        needs_save = (left_reg == 0 or left_reg >= 4)
-        if needs_save:
-            self._emit_push(left_reg, comment="Save left operand to stack")
-            # The value is now safe on the hardware stack; free the register
-            # so it can be reused during right-operand evaluation.
-            ra_pre = self.symbol_table.register_allocator
-            if left_reg not in ra_pre.RESERVED_REGISTERS:
-                ra_pre.free_temporary_register(left_reg)
+            right_reg = node.right.accept(self)
 
-        right_reg = node.right.accept(self)
+            # Restore left operand from the stack.
+            if needs_save:
+                # right_reg holds the value we need next, but _emit_pop clobbers R0.
+                # Pin/save right_reg so it survives the pop.
+                ra = self.symbol_table.register_allocator
 
-        # Restore left operand from the stack.
-        if needs_save:
-            # right_reg holds the value we need next, but _emit_pop clobbers R0.
-            # Pin/save right_reg so it survives the pop.
+                if right_reg == 0:
+                    right_reg = ra.save_alu_result(pin_live=True)
+                else:
+                    ra.mark_register_live(right_reg)
+
+                temp_left_reg = self.symbol_table.allocate_temporary()
+                self._emit_pop(temp_left_reg, comment="Restore left operand from stack")
+                
+                ra.mark_register_consumed(right_reg)
+
+                left_reg = temp_left_reg
+
+            # Arithmetic, bitwise, logical, and comparison operations
             ra = self.symbol_table.register_allocator
-
-            if right_reg == 0:
-                # R0 result: save to a fresh temp before pop clobbers it.
-                # pin_live=True marks it live so the temp_left_reg allocation
-                # below cannot evict it.
-                right_reg = ra.save_alu_result(pin_live=True)
-            else:
-                # Mark live so temp_left_reg allocation cannot spill right_reg.
-                ra.mark_register_live(right_reg)
-
-            temp_left_reg = self.symbol_table.allocate_temporary()
-            self._emit_pop(temp_left_reg, comment="Restore left operand from stack")
-
-            # Remove live pin on right_reg now that temp_left_reg is set.
-            # right_reg is still held in temporary_registers and will be freed
-            # by free_temporaries(left_reg, right_reg) in each operator branch.
-            ra.mark_register_consumed(right_reg)
-
-            left_reg = temp_left_reg
-
-        # Arithmetic, bitwise, logical, and comparison operations
-        ra = self.symbol_table.register_allocator
-        if node.operator == BinaryOperator.MODULO:
-            # a % b = a - (a / b) * b
-            # allocate_protected pins left/right live during the allocation.
-            div_reg = ra.allocate_protected(left_reg, right_reg)
-            self.emit(InstructionType.DIV, left_reg, right_reg, comment="Modulo: a / b")
-            self.emit(InstructionType.MVR, 0, div_reg, comment="Save quotient for modulo")
-            self.emit(InstructionType.MULT, div_reg, right_reg, comment="Modulo: (a / b) * b")
-            mult_reg = ra.allocate_protected(left_reg, right_reg)
-            self.emit(InstructionType.MVR, 0, mult_reg, comment="Save product for modulo")
-            self.emit(InstructionType.SUB, left_reg, mult_reg, comment="Modulo: a - (a / b) * b")
-            ra.free_temporaries(div_reg, mult_reg, right_reg)
-            self.symbol_table.exit_expression_scope()
-            return 0
-        elif node.operator == BinaryOperator.LOGICAL_AND:
-            result_reg = ra.allocate_protected(left_reg, right_reg)
-            false_label = self.generate_label("lgc_nd_fls")
-            end_label = self.generate_label("lgc_nd_nd")
-            self.emit(InstructionType.JZ, false_label, left_reg, comment="Logical AND: left zero")
-            self.emit(InstructionType.JZ, false_label, right_reg, comment="Logical AND: right zero")
-            self.emit_immediate(InstructionType.MVR, 1, result_reg, comment="Logical AND: true")
-            self.emit(InstructionType.JMP, end_label)
-            self.emit_label(false_label)
-            self.emit_immediate(InstructionType.MVR, 0, result_reg, comment="Logical AND: false")
-            self.emit(InstructionType.MVR, 0, 0, label=end_label)
-            ra.free_temporaries(left_reg, right_reg)
-            self.symbol_table.exit_expression_scope()
-            return result_reg
-        elif node.operator == BinaryOperator.LOGICAL_OR:
-            result_reg = ra.allocate_protected(left_reg, right_reg)
-            true_label = self.generate_label("lgc_or_tru")
-            end_label = self.generate_label("lgc_or_nd")
-            self.emit(InstructionType.JNZ, true_label, left_reg, comment="Logical OR: left nonzero")
-            self.emit(InstructionType.JNZ, true_label, right_reg, comment="Logical OR: right nonzero")
-            self.emit_immediate(InstructionType.MVR, 0, result_reg, comment="Logical OR: false")
-            self.emit(InstructionType.JMP, end_label)
-            self.emit_label(true_label)
-            self.emit_immediate(InstructionType.MVR, 1, result_reg, comment="Logical OR: true")
-            self.emit(InstructionType.MVR, 0, 0, label=end_label)
-            ra.free_temporaries(left_reg, right_reg)
-            self.symbol_table.exit_expression_scope()
-            return result_reg
-        elif node.operator in [
-            BinaryOperator.EQUALS, BinaryOperator.NOT_EQUALS, BinaryOperator.LESS_THAN, BinaryOperator.GREATER_THAN,
-            BinaryOperator.LESS_EQUAL, BinaryOperator.GREATER_EQUAL
-        ]:
-            # allocate_protected pins both operands live during result_reg allocation.
-            result_reg = ra.allocate_protected(left_reg, right_reg)
-            self.emit(InstructionType.SUB, left_reg, right_reg, comment="Comparison")
-            true_label = self.generate_label("tru")
-            end_label = self.generate_label("cmp_nd")
-
-            if node.operator == BinaryOperator.EQUALS:
-                self.emit(InstructionType.JZ, true_label, 0)
-            elif node.operator == BinaryOperator.NOT_EQUALS:
-                self.emit(InstructionType.JNZ, true_label, 0)
-            elif node.operator == BinaryOperator.LESS_THAN:
-                temp_reg = ra.allocate_protected(result_reg)
-                self.emit_immediate(InstructionType.MVR, 0x8000, temp_reg, comment="Load sign bit mask")
-                self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
-                self.emit(InstructionType.JNZ, true_label, 0, comment="Jump if negative (less than)")
-                ra.free_temporaries(temp_reg)
-            elif node.operator == BinaryOperator.GREATER_THAN:
-                else_label = self.generate_label("nt_grtr")
-                self.emit(InstructionType.JZ, else_label, 0, comment="Jump if equal (not greater)")
-                temp_reg = ra.allocate_protected(result_reg)
-                self.emit_immediate(InstructionType.MVR, 0x8000, temp_reg, comment="Load sign bit mask")
-                self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
-                self.emit(InstructionType.JZ, true_label, 0, comment="Jump if positive (greater than)")
-                self.emit_label(else_label)
-                ra.free_temporaries(temp_reg)
-            elif node.operator == BinaryOperator.LESS_EQUAL:
-                self.emit(InstructionType.JZ, true_label, 0, comment="Jump if equal")
-                temp_reg = ra.allocate_protected(result_reg)
-                self.emit_immediate(InstructionType.MVR, 0x8000, temp_reg, comment="Load sign bit mask")
-                self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
-                self.emit(InstructionType.JNZ, true_label, 0, comment="Jump if negative (less than)")
-                ra.free_temporaries(temp_reg)
-            elif node.operator == BinaryOperator.GREATER_EQUAL:
-                self.emit(InstructionType.JZ, true_label, 0, comment="Jump if equal")
-                temp_reg = ra.allocate_protected(result_reg)
-                self.emit_immediate(InstructionType.MVR, 0x8000, temp_reg, comment="Load sign bit mask")
-                self.emit(InstructionType.AND, 0, temp_reg, comment="Check sign bit")
-                self.emit(InstructionType.JZ, true_label, 0, comment="Jump if positive (greater than)")
-                ra.free_temporaries(temp_reg)
-            else:
-                self.symbol_table.exit_expression_scope()
-                raise CodeGenerationError(f"Unsupported comparison operator: {node.operator}")
-
-            self.emit_immediate(InstructionType.MVR, 0, result_reg)
-            self.emit(InstructionType.JMP, end_label)
-            self.emit_label(true_label)
-            self.emit_immediate(InstructionType.MVR, 1, result_reg, comment="True case")
-            self.emit(InstructionType.MVR, 0, 0, label=end_label)
-            ra.free_temporaries(left_reg, right_reg)
-            self.symbol_table.exit_expression_scope()
-            return result_reg
-        else:
-            # Arithmetic/bitwise
-            op_map = {
-                BinaryOperator.ADD: InstructionType.ADD,
-                BinaryOperator.SUBTRACT: InstructionType.SUB,
-                BinaryOperator.MULTIPLY: InstructionType.MULT,
-                BinaryOperator.DIVIDE: InstructionType.DIV,
-                BinaryOperator.AND: InstructionType.AND,
-                BinaryOperator.OR: InstructionType.OR,
-                BinaryOperator.XOR: InstructionType.XOR,
-                BinaryOperator.SHIFT_LEFT: InstructionType.SHL,
-                BinaryOperator.SHIFT_RIGHT: InstructionType.SHR,
-                # Add support for bitwise operators
-                BinaryOperator.BITWISE_AND: InstructionType.AND,
-                BinaryOperator.BITWISE_OR: InstructionType.OR,
-                BinaryOperator.BITWISE_XOR: InstructionType.XOR
-            }
-            if node.operator in op_map:
-                self.emit(op_map[node.operator], left_reg, right_reg, comment=f"{node.operator.value} operation")
+            if node.operator == BinaryOperator.MODULO:
+                # a % b = a - (a / b) * b
+                div_reg = ra.allocate_protected(left_reg, right_reg)
+                self.emit(InstructionType.DIV, left_reg, right_reg, comment="Modulo: a / b")
+                self.emit(InstructionType.MVR, 0, div_reg, comment="Save quotient for modulo")
+                self.emit(InstructionType.MULT, div_reg, right_reg, comment="Modulo: (a / b) * b")
+                mult_reg = ra.allocate_protected(left_reg, right_reg)
+                self.emit(InstructionType.MVR, 0, mult_reg, comment="Save product for modulo")
+                self.emit(InstructionType.SUB, left_reg, mult_reg, comment="Modulo: a - (a / b) * b")
+                ra.free_temporaries(div_reg, mult_reg, right_reg)
+                return 0
+            elif node.operator == BinaryOperator.LOGICAL_AND:
+                result_reg = ra.allocate_protected(left_reg, right_reg)
+                false_label = self.generate_label("lgc_nd_fls")
+                end_label = self.generate_label("lgc_nd_nd")
+                self.emit(InstructionType.JZ, false_label, left_reg, comment="Logical AND: left zero")
+                self.emit(InstructionType.JZ, false_label, right_reg, comment="Logical AND: right zero")
+                self.emit_immediate(InstructionType.MVR, 1, result_reg, comment="Logical AND: true")
+                self.emit(InstructionType.JMP, end_label)
+                self.emit_label(false_label)
+                self.emit_immediate(InstructionType.MVR, 0, result_reg, comment="Logical AND: false")
+                self.emit_label(end_label)
                 ra.free_temporaries(left_reg, right_reg)
-                self.symbol_table.exit_expression_scope()
-                return 0  # Result in register 0 (ALU output)
+                return result_reg
+            elif node.operator == BinaryOperator.LOGICAL_OR:
+                result_reg = ra.allocate_protected(left_reg, right_reg)
+                true_label = self.generate_label("lgc_or_tru")
+                end_label = self.generate_label("lgc_or_nd")
+                self.emit(InstructionType.JNZ, true_label, left_reg, comment="Logical OR: left nonzero")
+                self.emit(InstructionType.JNZ, true_label, right_reg, comment="Logical OR: right nonzero")
+                self.emit_immediate(InstructionType.MVR, 0, result_reg, comment="Logical OR: false")
+                self.emit(InstructionType.JMP, end_label)
+                self.emit_label(true_label)
+                self.emit_immediate(InstructionType.MVR, 1, result_reg, comment="Logical OR: true")
+                self.emit_label(end_label)
+                ra.free_temporaries(left_reg, right_reg)
+                return result_reg
+            elif node.operator in [
+                BinaryOperator.EQUALS, BinaryOperator.NOT_EQUALS,
+                BinaryOperator.LESS_THAN, BinaryOperator.GREATER_THAN,
+                BinaryOperator.LESS_EQUAL, BinaryOperator.GREATER_EQUAL,
+            ]:
+                # allocate_protected pins both operands live during result_reg allocation.
+                result_reg = ra.allocate_protected(left_reg, right_reg)
+                self.emit(InstructionType.SUB, left_reg, right_reg, comment="Comparison")
+                true_label = self.generate_label("tru")
+                end_label = self.generate_label("cmp_nd")
+                self._emit_comparison_result(node.operator, result_reg, true_label, end_label)
+                self.emit_immediate(InstructionType.MVR, 0, result_reg)
+                self.emit(InstructionType.JMP, end_label)
+                self.emit_label(true_label)
+                self.emit_immediate(InstructionType.MVR, 1, result_reg, comment="True case")
+                self.emit_label(end_label)
+                ra.free_temporaries(left_reg, right_reg)
+                return result_reg
             else:
-                self.symbol_table.exit_expression_scope()
+                # Arithmetic/bitwise
+                if node.operator in self._BINARY_OP_MAP:
+                    self.emit(self._BINARY_OP_MAP[node.operator], left_reg, right_reg,
+                             comment=f"{node.operator.value} operation")
+                    ra.free_temporaries(left_reg, right_reg)
+                    return 0  # Result in register 0 (ALU output)
                 raise CodeGenerationError(f"Unsupported binary operator: {node.operator}")
     
     def visit_unary_expression(self, node: UnaryExpression) -> int:
         """Generate code for unary expression and return result register."""
-        self.symbol_table.enter_expression_scope()
-        operand_reg = node.operand.accept(self)
+        with self._expression_scope():
+            operand_reg = node.operand.accept(self)
 
-        if node.operator == UnaryOperator.NEGATE:
-            temp_reg = self.symbol_table.allocate_temporary()
-            self.emit_immediate(InstructionType.MVR, 0, temp_reg, comment="Load 0 for negation")
-            self.emit(InstructionType.SUB, temp_reg, operand_reg, comment="Negate")
-            self.symbol_table.exit_expression_scope()
-            return 0
-        elif node.operator == UnaryOperator.NOT:
-            # Bitwise NOT
-            self.emit(InstructionType.NOT, operand_reg, comment="Bitwise NOT")
-            self.symbol_table.exit_expression_scope()
-            return 0
-        elif node.operator == UnaryOperator.LOGICAL_NOT:
-            # Logical NOT: result is 1 if operand is zero, else 0
-            result_reg = self.symbol_table.allocate_temporary()
-            true_label = self.generate_label("lgc_nt_tru")
-            end_label = self.generate_label("lgc_nt_nd")
-            self.emit(InstructionType.JZ, true_label, operand_reg, comment="Logical NOT: operand zero")
-            self.emit_immediate(InstructionType.MVR, 0, result_reg, comment="Logical NOT: false")
-            self.emit(InstructionType.JMP, end_label)
-            self.emit_label(true_label)
-            self.emit_immediate(InstructionType.MVR, 1, result_reg, comment="Logical NOT: true")
-            self.emit(InstructionType.MVR, 0, 0, label=end_label)
-            self.symbol_table.exit_expression_scope()
-            return result_reg
-        elif node.operator == UnaryOperator.ADDRESS_OF:
-            # Special handling for address of array element: @arr[index]
-            if isinstance(node.operand, ArrayAccess):
-                array_node = node.operand.array
-                index_node = node.operand.index
-                
-                if isinstance(array_node, Identifier):
-                    symbol = self.symbol_table.resolve(array_node.name)
-                    if symbol and symbol.storage_location == StorageLocation.RAM:
-                        # Calculate address without dereferencing
-                        index_reg = index_node.accept(self)
-                        addr_reg = self.symbol_table.allocate_temporary()
-                        self.emit_immediate(InstructionType.MVR, symbol.address, addr_reg,
-                                           comment=f"Base address of {array_node.name}")
-                        self.emit(InstructionType.ADD, addr_reg, index_reg,
-                                 comment="Calculate array element address")
-                        result_reg = self.symbol_table.allocate_temporary()
-                        self.emit(InstructionType.MVR, 0, result_reg,
-                                 comment="Get address from ALU")
-                        self.symbol_table.exit_expression_scope()
-                        return result_reg
-            
-            # Regular address-of for simple variables
-            symbol_name = getattr(node.operand, 'name', None)
-            if symbol_name:
-                symbol = self.symbol_table.resolve(symbol_name)
-                if symbol:
-                    # Stack variables: address is FP + frame_offset
-                    if symbol.storage_location == StorageLocation.STACK:
-                        result_reg = self._emit_fp_address(
-                            symbol.frame_offset,
-                            comment=f"Address of {symbol_name} (FP{symbol.frame_offset:+d})")
-                        self.symbol_table.exit_expression_scope()
-                        return result_reg
-                    # If symbol is an array, always in RAM
-                    if symbol.kind == SymbolKind.ARRAY or symbol.storage_location == StorageLocation.RAM:
-                        result_reg = self.symbol_table.allocate_temporary()
-                        self.emit_immediate(InstructionType.MVR, symbol.address, result_reg, comment=f"Address of {symbol_name} (RAM)")
-                        self.symbol_table.exit_expression_scope()
-                        return result_reg
-                    # If symbol is in register, move it to RAM
-                    if symbol.storage_location == StorageLocation.REGISTER:
-                        ram_addr = self.symbol_table.memory_manager.allocate_memory(symbol.name, symbol.size)
-                        self.emit(InstructionType.LOAD, symbol.address, Operand(ram_addr, True), comment=f"Move {symbol_name} from R{symbol.address} to RAM (immediate address)")
-                        self.symbol_table.register_allocator.free_register(symbol.address)
-                        symbol.storage_location = StorageLocation.RAM
-                        symbol.address = ram_addr
-                        result_reg = self.symbol_table.allocate_temporary()
-                        self.emit_immediate(InstructionType.MVR, ram_addr, result_reg, comment=f"Address of {symbol_name} (moved to RAM)")
-                        self.symbol_table.exit_expression_scope()
-                        return result_reg
-            # If not a simple variable, evaluate the operand and return its register (address)
-            addr_reg = node.operand.accept(self)
-            self.symbol_table.exit_expression_scope()
-            return addr_reg
-        elif node.operator == UnaryOperator.DEREFERENCE:
-            result_reg = self.symbol_table.allocate_temporary()
-            self.emit(InstructionType.READ, operand_reg, result_reg, comment="Dereference")
-            self.symbol_table.exit_expression_scope()
-            return result_reg
-        else:
-            self.symbol_table.exit_expression_scope()
-            raise CodeGenerationError(f"Unsupported unary operator: {node.operator}")
+            if node.operator == UnaryOperator.NEGATE:
+                temp_reg = self.symbol_table.allocate_temporary()
+                self.emit_immediate(InstructionType.MVR, 0, temp_reg, comment="Load 0 for negation")
+                self.emit(InstructionType.SUB, temp_reg, operand_reg, comment="Negate")
+                return 0
+            elif node.operator == UnaryOperator.NOT:
+                # Bitwise NOT
+                self.emit(InstructionType.NOT, operand_reg, comment="Bitwise NOT")
+                return 0
+            elif node.operator == UnaryOperator.LOGICAL_NOT:
+                # Logical NOT: result is 1 if operand is zero, else 0
+                result_reg = self.symbol_table.allocate_temporary()
+                true_label = self.generate_label("lgc_nt_tru")
+                end_label = self.generate_label("lgc_nt_nd")
+                self.emit(InstructionType.JZ, true_label, operand_reg, comment="Logical NOT: operand zero")
+                self.emit_immediate(InstructionType.MVR, 0, result_reg, comment="Logical NOT: false")
+                self.emit(InstructionType.JMP, end_label)
+                self.emit_label(true_label)
+                self.emit_immediate(InstructionType.MVR, 1, result_reg, comment="Logical NOT: true")
+                self.emit_label(end_label)
+                return result_reg
+            elif node.operator == UnaryOperator.ADDRESS_OF:
+                # Special handling for address of array element: @arr[index]
+                if isinstance(node.operand, ArrayAccess):
+                    array_node = node.operand.array
+                    index_node = node.operand.index
+                    if isinstance(array_node, Identifier):
+                        symbol = self.symbol_table.resolve(array_node.name)
+                        if symbol and symbol.storage_location == StorageLocation.RAM:
+                            # Calculate element address without dereferencing
+                            index_reg = index_node.accept(self)
+                            addr_reg = self._emit_array_address(
+                                symbol.address, index_reg,
+                                comment=f"Address of {array_node.name}[index]")
+                            self._safe_free(index_reg)
+                            return addr_reg
+
+                # Regular address-of for simple variables
+                symbol_name = getattr(node.operand, 'name', None)
+                if symbol_name:
+                    symbol = self.symbol_table.resolve(symbol_name)
+                    if symbol:
+                        # Stack variables: address is FP + frame_offset
+                        if symbol.storage_location == StorageLocation.STACK:
+                            return self._emit_fp_address(
+                                symbol.frame_offset,
+                                comment=f"Address of {symbol_name} (FP{symbol.frame_offset:+d})")
+                        # If symbol is an array or RAM variable, return its address as immediate
+                        if symbol.kind == SymbolKind.ARRAY or symbol.storage_location == StorageLocation.RAM:
+                            result_reg = self.symbol_table.allocate_temporary()
+                            self.emit_immediate(InstructionType.MVR, symbol.address, result_reg,
+                                               comment=f"Address of {symbol_name} (RAM)")
+                            return result_reg
+                        # If symbol is in a register, move it to RAM first
+                        if symbol.storage_location == StorageLocation.REGISTER:
+                            ram_addr = self.symbol_table.memory_manager.allocate_memory(
+                                symbol.name, symbol.size)
+                            self.emit(InstructionType.LOAD, symbol.address,
+                                     Operand(ram_addr, True),
+                                     comment=f"Move {symbol_name} from R{symbol.address} to RAM")
+                            self.symbol_table.register_allocator.free_register(symbol.address)
+                            symbol.storage_location = StorageLocation.RAM
+                            symbol.address = ram_addr
+                            result_reg = self.symbol_table.allocate_temporary()
+                            self.emit_immediate(InstructionType.MVR, ram_addr, result_reg,
+                                               comment=f"Address of {symbol_name} (moved to RAM)")
+                            return result_reg
+                # If not a simple variable, evaluate operand and return its register (address)
+                return node.operand.accept(self)
+            elif node.operator == UnaryOperator.DEREFERENCE:
+                result_reg = self.symbol_table.allocate_temporary()
+                self.emit(InstructionType.READ, operand_reg, result_reg, comment="Dereference")
+                return result_reg
+            else:
+                raise CodeGenerationError(f"Unsupported unary operator: {node.operator}")
     
     def visit_assignment_expression(self, node: AssignmentExpression) -> int:
         """Generate code for assignment expression."""
@@ -1030,11 +1034,8 @@ class AssemblyGenerator(ASTVisitor):
                 result_reg = self._emit_fp_store(
                     value_reg, symbol.frame_offset,
                     comment=f"Assign to {node.target.name} (FP{symbol.frame_offset:+d})")
-                # _emit_fp_store copies value_reg into a fresh save_reg (result_reg).
-                # Free the original value_reg since save_reg now holds the value.
-                ra = self.symbol_table.register_allocator
-                if value_reg != result_reg and value_reg not in ra.RESERVED_REGISTERS:
-                    ra.free_temporary_register(value_reg)
+                
+                self._safe_free(value_reg)
                 # result_reg is a fresh temp holding the stored value; caller owns it.
                 return result_reg
 
@@ -1059,48 +1060,29 @@ class AssemblyGenerator(ASTVisitor):
                 symbol = self.symbol_table.resolve(array_node.name)
                 if symbol and symbol.storage_location == StorageLocation.RAM:
                     index_reg = index_node.accept(self)
-                    addr_reg = self.symbol_table.allocate_temporary()
-                    self.emit_immediate(InstructionType.MVR, symbol.address, addr_reg, comment=f"Base address of {array_node.name}")
-                    self.emit(InstructionType.ADD, addr_reg, index_reg, comment="Calculate array address")
-                    # Store value
-                    self.emit(InstructionType.LOAD, value_reg, 0, comment="Array assignment")
-                    # Free intermediates; value_reg is returned as result so caller frees it
-                    ra = self.symbol_table.register_allocator
-                    if index_reg not in ra.RESERVED_REGISTERS:
-                        ra.free_temporary_register(index_reg)
-                    ra.free_temporary_register(addr_reg)
+                    addr_reg = self._emit_array_address(
+                        symbol.address, index_reg,
+                        comment=f"Base address of {array_node.name}")
+                    self._safe_free(index_reg)
+                    self.emit(InstructionType.LOAD, value_reg, addr_reg, comment="Array assignment")
+                    self._safe_free(addr_reg)
                     return value_reg
             # Fallback: treat as pointer arithmetic
             base_reg = array_node.accept(self)
             index_reg = index_node.accept(self)
-            addr_reg = self.symbol_table.allocate_temporary()
-            self.emit(InstructionType.ADD, base_reg, index_reg, comment="Calculate array address (fallback)")
-            self.emit(InstructionType.MVR, 0, addr_reg)
+            addr_reg = self._emit_array_address(base_reg, index_reg,
+                                                 comment="Array address (fallback)",
+                                                 base_is_reg=True)
+            self._safe_free(base_reg)
+            self._safe_free(index_reg)
             self.emit(InstructionType.LOAD, value_reg, addr_reg, comment="Array assignment (fallback)")
-            # Free intermediates; value_reg is returned as result so caller frees it
-            ra = self.symbol_table.register_allocator
-            if base_reg not in ra.RESERVED_REGISTERS:
-                ra.free_temporary_register(base_reg)
-            if index_reg not in ra.RESERVED_REGISTERS:
-                ra.free_temporary_register(index_reg)
-            ra.free_temporary_register(addr_reg)
+            self._safe_free(addr_reg)
             return value_reg
         elif isinstance(node.target, UnaryExpression) and node.target.operator == UnaryOperator.DEREFERENCE:
-            # Pointer dereference assignment: *ptr = value
             ptr_reg = node.target.operand.accept(self)
-            
-            # If pointer expression returned R0 (ALU result), save it to a temporary
-            if ptr_reg == 0:
-                temp_reg = self.symbol_table.allocate_temporary()
-                self.emit(InstructionType.MVR, 0, temp_reg, comment="Save pointer address from ALU")
-                ptr_reg = temp_reg
-            
-            # Store value at address contained in ptr_reg
+            ptr_reg = self._rescue_r0(ptr_reg, comment="Save pointer address from ALU")
             self.emit(InstructionType.LOAD, value_reg, ptr_reg, comment="Pointer dereference assignment")
-            # Free value_reg since it has been stored; ptr_reg is returned as result
-            ra = self.symbol_table.register_allocator
-            if value_reg not in ra.RESERVED_REGISTERS:
-                ra.free_temporary_register(value_reg)
+            self._safe_free(value_reg)
             return ptr_reg
         else:
             raise CodeGenerationError(f"Invalid assignment target: {type(node.target)}")
@@ -1134,15 +1116,8 @@ class AssemblyGenerator(ASTVisitor):
                     continue
 
             arg_reg = arg.accept(self)
-
-            # If value landed in R0 save it to a safe temp so that _emit_push
-            # (which starts with SUB → R0) does not destroy it.
-            if arg_reg == 0:
-                tmp = self.symbol_table.allocate_temporary()
-                self.emit(InstructionType.MVR, 0, tmp, comment="Move arg from R0 to temp")
-                args_regs.append(tmp)
-            else:
-                args_regs.append(arg_reg)
+            # Rescue R0: _emit_push starts with SUB which clobbers R0.
+            args_regs.append(self._rescue_r0(arg_reg, comment="Move arg from R0 to temp"))
 
         # ------------------------------------------------------------------
         # Step 2 – push arguments right-to-left so param 0 is on top
@@ -1175,10 +1150,7 @@ class AssemblyGenerator(ASTVisitor):
         # ------------------------------------------------------------------
         n = len(node.arguments)
         if n > 0:
-            self.emit(InstructionType.ADD, self.STACK_POINTER_REG, Operand(n, True),
-                     comment=f"Pop {n} argument slot(s)")
-            self.emit(InstructionType.MVR, 0, 1, comment="R1 = new SP")
-            self.emit(InstructionType.MVR, 1, self.STACK_POINTER_REG, comment="SP = R1")
+            self._emit_sp_increment(n, comment=f"Pop {n} argument slot(s)")
 
         return result_reg
     
@@ -1310,16 +1282,7 @@ class AssemblyGenerator(ASTVisitor):
             return 0
 
         # Default: other GPU built-ins
-        gpu_func_map = {
-            'drawLine': InstructionType.DRLINE,
-            'fillGrid': InstructionType.DRGRD,
-            'clearGrid': InstructionType.CLRGRID,
-            'loadSprite': InstructionType.LDSPR,
-            'drawSprite': InstructionType.DRSPR,
-            'loadText': InstructionType.LDTXT,
-            'drawText': InstructionType.DRTXT,
-            'scrollBuffer': InstructionType.SCRLBFR
-        }
+        gpu_func_map = self._GPU_FUNC_MAP
         if node.function_name not in gpu_func_map:
             _cleanup()
             raise CodeGenerationError(f"Unknown GPU function: {node.function_name}")
@@ -1353,10 +1316,8 @@ class AssemblyGenerator(ASTVisitor):
             
             # Handle compile-time constant sizes
             if hasattr(size_expr, 'value') and isinstance(size_expr.value, int):
-                # Constant size allocation
                 size = size_expr.value
                 
-                # Allocate memory using memory manager
                 temp_symbol_name = f"malloc_temp_{self.label_counter}"
                 self.label_counter += 1
                 
@@ -1372,7 +1333,6 @@ class AssemblyGenerator(ASTVisitor):
                 self.instructions.append(instruction)
                 return result_reg
             else:
-                # Runtime size allocation - not supported in compile-time memory management
                 raise CodeGenerationError("malloc with runtime size not supported - size must be compile-time constant")
         
         elif node.function_name == "free":
@@ -1382,14 +1342,7 @@ class AssemblyGenerator(ASTVisitor):
             
             ptr_reg = node.arguments[0].accept(self)
             
-            # For compile-time memory management, we need to track which allocation this corresponds to
-            # This is a simplified implementation - in practice, you'd want more sophisticated tracking
-            
-            # Generate a comment for the free operation
             self.emit(InstructionType.MVR, 0, 0, comment=f"free(R{ptr_reg}) - memory deallocated at compile time")
-            
-            # Note: The actual freeing happens at compile time through the memory manager
-            # The runtime code doesn't need to do anything since memory layout is predetermined
             
             return 0  # free returns void
         elif node.function_name == "readChar":
@@ -1426,18 +1379,25 @@ class AssemblyGenerator(ASTVisitor):
             symbol = self.symbol_table.resolve(array_node.name)
             if symbol and symbol.storage_location == StorageLocation.RAM:
                 index_reg = index_node.accept(self)
-                addr_reg = self.symbol_table.allocate_temporary()
-                self.emit_immediate(InstructionType.MVR, symbol.address, addr_reg, comment=f"Base address of {array_node.name}")
-                self.emit(InstructionType.ADD, addr_reg, index_reg, comment="Calculate array address")
+                addr_reg = self._emit_array_address(
+                    symbol.address, index_reg,
+                    comment=f"Base address of {array_node.name}")
+                self._safe_free(index_reg)
                 result_reg = self.symbol_table.allocate_temporary()
-                self.emit(InstructionType.READ, 0, result_reg, comment="Load array element")
+                self.emit(InstructionType.READ, addr_reg, result_reg, comment="Load array element")
+                self._safe_free(addr_reg)
                 return result_reg
         # Fallback: treat as pointer arithmetic
         base_reg = array_node.accept(self)
         index_reg = index_node.accept(self)
-        self.emit(InstructionType.ADD, base_reg, index_reg, comment="Array index calculation (fallback)")
+        addr_reg = self._emit_array_address(base_reg, index_reg,
+                                             comment="Array index calculation (fallback)",
+                                             base_is_reg=True)
+        self._safe_free(base_reg)
+        self._safe_free(index_reg)
         result_reg = self.symbol_table.allocate_temporary()
-        self.emit(InstructionType.READ, 0, result_reg, comment="Load array element (fallback)")
+        self.emit(InstructionType.READ, addr_reg, result_reg, comment="Load array element (fallback)")
+        self._safe_free(addr_reg)
         return result_reg
     
     
@@ -1446,7 +1406,7 @@ class AssemblyGenerator(ASTVisitor):
         size = len(node.elements)
         ram_addr = self.symbol_table.memory_manager.allocate_memory("array_literal_temp_{}".format(self.label_counter), size)
         self.label_counter += 1
-        # Emit code to initialize each element
+        
         for i, elem in enumerate(node.elements):
             value_reg = elem.accept(self)
             addr = ram_addr + i
@@ -1471,7 +1431,6 @@ class AssemblyGenerator(ASTVisitor):
         The asm() expression evaluates to the value in register 0.
         """
         asm_text = node.asm_text
-        # Split into lines and emit raw assembly lines
         for raw_line in asm_text.splitlines():
             line = raw_line.strip()
             if not line:
@@ -1562,11 +1521,40 @@ class AssemblyGenerator(ASTVisitor):
         """Get memory usage statistics from symbol table."""
         return self.symbol_table.get_memory_stats()
 
+# ---------------------------------------------------------------------------
+# Class-level operator/function maps (populated after the class body so that
+# both InstructionType and BinaryOperator are fully defined).
+# ---------------------------------------------------------------------------
+AssemblyGenerator._BINARY_OP_MAP = {
+    BinaryOperator.ADD:         InstructionType.ADD,
+    BinaryOperator.SUBTRACT:    InstructionType.SUB,
+    BinaryOperator.MULTIPLY:    InstructionType.MULT,
+    BinaryOperator.DIVIDE:      InstructionType.DIV,
+    BinaryOperator.AND:         InstructionType.AND,   # keyword 'and'
+    BinaryOperator.OR:          InstructionType.OR,    # keyword 'or'
+    BinaryOperator.XOR:         InstructionType.XOR,   # keyword 'xor'
+    BinaryOperator.SHIFT_LEFT:  InstructionType.SHL,
+    BinaryOperator.SHIFT_RIGHT: InstructionType.SHR,
+    # Symbol forms — intentionally alias the same opcodes as the keyword forms.
+    BinaryOperator.BITWISE_AND: InstructionType.AND,
+    BinaryOperator.BITWISE_OR:  InstructionType.OR,
+    BinaryOperator.BITWISE_XOR: InstructionType.XOR,
+}
+
+AssemblyGenerator._GPU_FUNC_MAP = {
+    'drawLine':     InstructionType.DRLINE,
+    'fillGrid':     InstructionType.DRGRD,
+    'clearGrid':    InstructionType.CLRGRID,
+    'loadSprite':   InstructionType.LDSPR,
+    'drawSprite':   InstructionType.DRSPR,
+    'loadText':     InstructionType.LDTXT,
+    'drawText':     InstructionType.DRTXT,
+    'scrollBuffer': InstructionType.SCRLBFR,
+}
 
 class CodeGenerationError(Exception):
     """Exception raised for code generation errors."""
     pass
-
 
 def generate_assembly(ast: Program, ram_start: int = 0x1000, ram_size: int = 0x1000) -> str:
     """Generate assembly code from AST."""
