@@ -559,14 +559,11 @@ class SymbolTable:
         self.expression_scope_stack.append(set())
         # Also enter a register allocation scope
         self.register_allocator.enter_register_scope()
-        print(' '*len(self.expression_scope_stack)+"Entering new expression scope: ", len(self.expression_scope_stack))
     
     def exit_expression_scope(self) -> None:
         """Exit the current expression scope and free its temporary registers."""
         if not self.expression_scope_stack:
             return
-            
-        print(' '*len(self.expression_scope_stack)+"Exiting expression scope: ", len(self.expression_scope_stack))
 
         temp_registers = self.expression_scope_stack.pop()
         for reg in temp_registers:
@@ -760,7 +757,7 @@ class RegisterAllocator:
             del self.register_to_symbol[register]
             del self.symbol_to_register[symbol]
             del self.register_usage_count[register]
-            print(' ' * (len(self.symbol_table.expression_scope_stack) ) + f"Freed symbol {symbol} in R{register} ")
+
         
         self.mark_register_available(register)
         
@@ -878,7 +875,7 @@ class RegisterAllocator:
         self.register_to_symbol[register] = symbol_name
         self.symbol_to_register[symbol_name] = register
         self.register_usage_count[register] = 0
-        print(' ' * (len(self.symbol_table.expression_scope_stack)) + f"Assigned symbol {symbol_name} to register R{register}")
+
     
     def _spill_and_allocate(self, symbol_name: str, is_parameter: bool) -> Optional[int]:
         """Spill least recently used symbol and allocate register."""

@@ -52,6 +52,7 @@ MCL supports:
 - **Function Control**: `return`, `break`, `continue`
 - **Comments**: Single-line with `//`
 - **Literals**: Integer (decimal/hex), character with escape sequences
+- **Preprocessor**: `#include`, `#define`, `#undef`, `#ifdef`/`#ifndef`/`#else`/`#endif`
 
 ### Variables and Types
 
@@ -188,6 +189,142 @@ function grade_to_gpa(grade: char) {
     }
 }
 ```
+
+## Preprocessor
+
+The MCL compiler runs a text-level preprocessor over your source file **before** lexing. Preprocessor directives start with `#` and are always on their own line. Each directive line is replaced by a blank line in the expanded output so that line numbers in error messages stay accurate.
+
+### `#include`
+
+Splices another `.mcl` file in place at the `#include` point. The path is relative to the **including** file's directory.
+
+```mcl
+#include "utils/math.mcl"
+#include "config.mcl"
+
+function main() {
+    return square(7);
+}
+```
+
+Nested includes are supported: an included file can itself `#include` other files. The preprocessor detects and rejects circular includes.
+
+#### Include Guards
+
+Use the `#ifndef` / `#define` / `#endif` idiom to prevent a file from being included more than once:
+
+```mcl
+// math.mcl
+#ifndef MATH_H
+#define MATH_H
+
+function square(n: int) {
+    return n * n;
+}
+
+#endif
+```
+
+```mcl
+// main.mcl — safe to include math.mcl twice; body only processed once
+#include "math.mcl"
+#include "math.mcl"
+
+function main() {
+    return square(5);
+}
+```
+
+### `#define`
+
+**Flag form** — defines a name with no value. Used with `#ifdef` / `#ifndef` for conditional compilation:
+
+```mcl
+#define DEBUG
+#define RELEASE_BUILD
+```
+
+**Value form** — defines a text substitution macro. Wherever `NAME` appears as a complete word in subsequent source lines, it is replaced with `value`:
+
+```mcl
+#define ARRAY_SIZE 64
+#define HEAP_BASE  8192
+
+var buf: int[ARRAY_SIZE];        // expands to: var buf: int[64];
+int* heap = HEAP_BASE;           // expands to: int* heap = 8192;
+```
+
+Substitution is whole-word only, so `ARRAY_SIZE` in the name `MAX_ARRAY_SIZE` is **not** replaced.
+
+A later `#define` for the same name silently overwrites the previous definition.
+
+### `#undef`
+
+Removes a previously defined name. Silently does nothing if the name was never defined.
+
+```mcl
+#define TEMP 42
+int x = TEMP;    // x = 42
+#undef TEMP
+int y = TEMP;    // y = TEMP  (no substitution, name is gone)
+```
+
+### `#ifdef` / `#ifndef` / `#else` / `#endif`
+
+Conditionally emit or suppress blocks of code based on whether a name is defined. Nesting is fully supported.
+
+```mcl
+#define PLATFORM_FAST
+
+#ifdef PLATFORM_FAST
+function compute(x: int) {
+    return x * 2;   // fast path
+}
+#else
+function compute(x: int) {
+    return x;       // fallback
+}
+#endif
+```
+
+```mcl
+#ifndef NDEBUG
+// Only compiled in debug builds
+function assert_nonzero(x: int) {
+    if (x == 0) { return -1; }
+    return 0;
+}
+#endif
+```
+
+Nested conditionals:
+
+```mcl
+#define GRAPHICS
+#define HIGH_RES
+
+#ifdef GRAPHICS
+#ifdef HIGH_RES
+    int screen_w = 64;
+#else
+    int screen_w = 32;
+#endif
+#endif
+```
+
+### Preprocessor Error Messages
+
+The preprocessor raises errors with file name and line number for:
+
+- `#include` file not found
+- Circular `#include` chain
+- `#else` or `#endif` without a matching `#ifdef` / `#ifndef`
+- Unterminated `#ifdef` / `#ifndef` block at end of file
+- `#include` path not in quotes
+- `#define` / `#ifdef` / `#ifndef` / `#undef` with a missing or invalid name
+- Unknown directive (e.g. `#pragma`)
+
+---
 
 ## GPU Programming
 

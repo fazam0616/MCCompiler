@@ -1,0 +1,174 @@
+// =============================================================
+// heap_alloc.mcl  —  runtime heap allocator library
+//
+// Memory map
+// ----------
+//   0x0200        : heap_ptr  – next unused word in the heap
+//   0x2000-0x5FFE : heap region (~16 KB)
+//
+// Block layout
+// ------------
+//   [ header ][ d0 ][ d1 ] ... [ d(size-1) ]
+//     ^                          ^
+//     ptr - 1                    ptr  (returned to caller)
+//
+//   header bits:
+//     15    : 1 = block is FREE, 0 = block is IN-USE
+//     14..0 : block size in words (data area only, header not counted)
+//
+// Public API
+// ----------
+//   heap_init()          – call once before any malloc/free
+//   heap_malloc(size)    – allocate size words; returns ptr or 0 on OOM
+//   heap_free(ptr)       – mark block as free
+//   heap_used()          – return total currently in-use word count
+//   mem_read_abs(addr)   – read one word from absolute RAM address
+//   mem_write_abs(a, v)  – write one word to absolute RAM address
+// =============================================================
+
+#ifndef HEAP_ALLOC_H
+#define HEAP_ALLOC_H
+
+#define HEAP_BASE     0x2000
+#define HEAP_MAX      0x5FFE
+#define HEAP_PTR_ADDR 0x0200
+#define FREE_FLAG     0x8000
+#define SIZE_MASK     0x7FFF
+
+// ------------------------------------------------------------------
+// mem_read_abs(addr) — read one word from an absolute RAM address.
+//
+// Inline assembly: READ %0, 0
+//   %0  → register holding `addr`
+//   0   → destination register R0
+//   Effect: R0 = RAM[ R(%0) ]
+//   asm() returns R0.
+// ------------------------------------------------------------------
+function mem_read_abs(addr: int) {
+    return asm("READ %0, 0", addr);
+}
+
+// ------------------------------------------------------------------
+// mem_write_abs(addr, value) — write one word to an absolute RAM address.
+//
+// Inline assembly: LOAD %1, %0
+//   %1  → register holding `value`  (LOAD operand 1: src)
+//   %0  → register holding `addr`   (LOAD operand 2: dst_addr)
+//   Effect: RAM[ R(%0) ] = R(%1)
+// ------------------------------------------------------------------
+function mem_write_abs(addr: int, value: int) {
+    asm("LOAD %1, %0", addr, value);
+}
+
+// ------------------------------------------------------------------
+// heap_init() — must be called once before any heap_malloc/free.
+// Stores HEAP_BASE into the heap-pointer word at HEAP_PTR_ADDR.
+//
+// Inline assembly: LOAD %0, i:0x0200
+//   %0       → register holding `base` (= HEAP_BASE)
+//   i:0x0200 → immediate destination address
+//   Effect: RAM[0x0200] = R(%0)
+// ------------------------------------------------------------------
+function heap_init() {
+    var base: int = HEAP_BASE;
+    asm("LOAD %0, i:0x0200", base);
+}
+
+// ------------------------------------------------------------------
+// heap_malloc(size) — allocate `size` data words.
+// Returns a pointer to the first data word, or 0 on failure.
+//
+// Strategy:
+//   Phase 1 – first-fit scan through all committed blocks.  When a
+//             free block large enough is found it is claimed; if the
+//             leftover is >= 2 words (1 header + 1 data) the tail is
+//             split into a new free block.
+//   Phase 2 – if no free block fits, extend the heap upward.
+// ------------------------------------------------------------------
+function heap_malloc(size: int) {
+    // Read the current high-water mark.
+    // Inline assembly: READ i:0x0200, 0
+    //   i:0x0200 → immediate source address
+    //   0        → destination register R0
+    //   Effect: R0 = RAM[0x0200];  asm() returns R0.
+    var heap_ptr: int = asm("READ i:0x0200, 0");
+
+    // ---- Phase 1: first-fit scan through committed blocks ----
+    var cur: int = HEAP_BASE;
+    while (cur < heap_ptr) {
+        var hdr: int = mem_read_abs(cur);
+        var block_size: int = hdr & SIZE_MASK;
+
+        if (hdr & FREE_FLAG) {           // block is free
+            if (block_size >= size) {    // big enough?
+
+                // Split: only if leftover has room for a header + >=1 data word.
+                if (block_size >= size + 2) {
+                    var split_addr: int = cur + size + 1;
+                    var leftover: int   = (block_size - size - 1) | FREE_FLAG;
+                    mem_write_abs(split_addr, leftover);
+                }
+
+                // Mark block in-use with the exact requested size.
+                mem_write_abs(cur, size);
+                return cur + 1;          // pointer to data region
+            }
+        }
+
+        // Advance past this block: 1 header word + block_size data words.
+        cur = cur + block_size + 1;
+    }
+
+    // ---- Phase 2: extend the heap ----
+    var needed: int = heap_ptr + size + 1;
+    if (needed > HEAP_MAX) {
+        return 0;   // out of heap space
+    }
+
+    mem_write_abs(heap_ptr, size);      // write header (in-use)
+    var data_ptr: int = heap_ptr + 1;
+
+    // Advance heap_ptr.
+    // Inline assembly: LOAD %0, i:0x0200
+    //   stores the new high-water mark into RAM[0x0200].
+    var new_hp: int = heap_ptr + size + 1;
+    asm("LOAD %0, i:0x0200", new_hp);
+
+    return data_ptr;
+}
+
+// ------------------------------------------------------------------
+// heap_free(ptr) — mark the block pointed to by `ptr` as free.
+// `ptr` must be a value returned by heap_malloc (points to data[0]).
+// ------------------------------------------------------------------
+function heap_free(ptr: int) {
+    var hdr_addr: int  = ptr - 1;
+    var hdr: int       = mem_read_abs(hdr_addr);
+    var freed_hdr: int = hdr | FREE_FLAG;
+    mem_write_abs(hdr_addr, freed_hdr);
+}
+
+// ------------------------------------------------------------------
+// heap_used() — return total in-use word count (for diagnostics).
+// Walks every committed block; sums sizes of non-free blocks.
+// ------------------------------------------------------------------
+function heap_used() {
+    var heap_ptr: int = asm("READ i:0x0200, 0");
+    var cur: int  = HEAP_BASE;
+    var used: int = 0;
+
+    while (cur < heap_ptr) {
+        var hdr: int        = mem_read_abs(cur);
+        var block_size: int = hdr & SIZE_MASK;
+
+        if (!(hdr & FREE_FLAG)) {
+            used = used + block_size;
+        }
+
+        cur = cur + block_size + 1;
+    }
+
+    return used;
+}
+
+#endif

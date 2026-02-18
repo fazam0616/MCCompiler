@@ -645,14 +645,18 @@ class Parser:
             return MemoryFunctionCall(mem_func, arguments)
 
         if self.match(TokenType.ASM):
-            # Expect a string literal containing the assembly text
+            # Expect a string literal containing the assembly template, followed by
+            # optional comma-separated MCL expressions: asm("template", arg0, arg1, ...)
             self.consume(TokenType.LEFT_PAREN, "Expected '(' after asm")
             if self.match(TokenType.STRING):
                 asm_code = self.previous().value
             else:
                 self.error("Expected string literal in asm(...) call")
+            asm_args = []
+            while self.match(TokenType.COMMA):
+                asm_args.append(self.expression())
             self.consume(TokenType.RIGHT_PAREN, "Expected ')' after asm(...) arguments")
-            return AsmFunctionCall(asm_code)
+            return AsmFunctionCall(asm_code, asm_args)
 
         # GPU built-in functions
         if self.match(TokenType.DRAWLINE, TokenType.FILLGRID, TokenType.CLEARGRID,

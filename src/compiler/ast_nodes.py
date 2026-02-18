@@ -211,8 +211,21 @@ class MemoryFunctionCall(Expression):
 
 @dataclass
 class AsmFunctionCall(Expression):
-    """Inline assembly function call: asm("...") returns int from R0."""
+    """Inline assembly function call: asm("template", arg0, arg1, ...) returns int from R0.
+
+    The template string may contain ``%0``, ``%1``, … placeholders that are
+    substituted with the register numbers holding the evaluated MCL arguments
+    at code-generation time.  Example::
+
+        asm("ADD %0, %1", x, y)   // %0 → reg of x, %1 → reg of y
+        asm("MVR %0, 5", myVar)   // %0 → reg of myVar
+    """
     asm_text: str
+    args: list = None  # Optional list of Expression nodes (positional args)
+
+    def __post_init__(self):
+        if self.args is None:
+            self.args = []
 
     def accept(self, visitor):
         return getattr(visitor, 'visit_asm_function_call')(self)

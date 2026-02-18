@@ -431,9 +431,8 @@ class AssemblyGenerator(ASTVisitor):
                 )
                 self.symbol_table.define_function(decl.name, func_type)
         
-        # Second pass: emit global variable initializers BEFORE jumping to main,
+        # Emit global variable initializers BEFORE jumping to main,
         # so that globals are set up when main runs.
-        from src.compiler.ast_nodes import VariableDeclaration as VarDecl
         for decl in node.declarations:
             if not isinstance(decl, FunctionDeclaration):
                 decl.accept(self)
@@ -500,7 +499,6 @@ class AssemblyGenerator(ASTVisitor):
                 size = node.var_type.size if hasattr(node.var_type, 'size') else 10
                 self._check_static_bounds(size, node.name)
             symbol = self.symbol_table.define_variable(node.name, node.var_type)
-            ra = self.symbol_table.register_allocator
             for i, elem in enumerate(node.initializer.elements):
                 elem_reg = elem.accept(self)
                 self.emit(InstructionType.LOAD, elem_reg,
@@ -1424,29 +1422,81 @@ class AssemblyGenerator(ASTVisitor):
         return result_reg
 
     def visit_asm_function_call(self, node: 'AsmFunctionCall') -> int:
-        """Inject raw assembly from asm("...") into the output.
+        """Inject raw assembly from asm("template", arg0, arg1, ...) into the output.
 
-        The asm text is a string with one or more lines. Each non-empty
-        non-comment line is emitted verbatim into the generated assembly.
+        The template string may contain ``%0``, ``%1``, … placeholders which
+        are substituted with the register-number strings of the corresponding
+        evaluated MCL arguments before the lines are emitted.  Substitution is
+        performed longest-first (``%10`` before ``%1``) so multi-digit indices
+        do not partially match shorter ones.
+
+        For immediate-mode usage the caller can prefix the placeholder in the
+        template: ``i:%0`` becomes e.g. ``i:7`` after substitution, which is a
+        valid immediate operand in the assembly.
+
         The asm() expression evaluates to the value in register 0.
         """
+        ra = self.symbol_table.register_allocator
+
+        # ------------------------------------------------------------------
+        # 1. Evaluate each argument, keeping all results live so that a later
+        #    argument evaluation doesn't evict an earlier one.
+        #    Mirrors the pattern used in visit_gpu_function_call.
+        # ------------------------------------------------------------------
+        arg_regs = []
+        saved_temps = []  # temps created by save_alu_result (to free later)
+        for arg_expr in (node.args or []):
+            reg = arg_expr.accept(self)
+            if reg == 0:
+                # R0 is the ALU output register; the next evaluation would
+                # clobber it.  Save it into a pinned temp now.
+                temp = ra.save_alu_result(pin_live=True)
+                arg_regs.append(temp)
+                saved_temps.append(temp)
+            else:
+                arg_regs.append(reg)
+
+        # Pin all arg regs live so the allocator won't reuse them.
+        for reg in arg_regs:
+            ra.mark_register_live(reg)
+
+        # ------------------------------------------------------------------
+        # 2. Build the %N → register-string substitution table.
+        #    Sort keys longest-first to avoid partial matches (e.g. "%10"
+        #    before "%1").
+        # ------------------------------------------------------------------
+        substitutions = {f"%{i}": str(reg) for i, reg in enumerate(arg_regs)}
+        sorted_keys = sorted(substitutions, key=len, reverse=True)
+
+        def _apply_substitutions(text: str) -> str:
+            for key in sorted_keys:
+                text = text.replace(key, substitutions[key])
+            return text
+
+        # ------------------------------------------------------------------
+        # 3. Emit each line of the template after substitution.
+        # ------------------------------------------------------------------
         asm_text = node.asm_text
         for raw_line in asm_text.splitlines():
             line = raw_line.strip()
             if not line:
                 continue
-            # Preserve comments (lines starting with //) and labels (ending with ':')
+            line = _apply_substitutions(line)
             if line.startswith('//'):
-                # Emit as a comment-only line
                 self.emit(None, comment=f"RAW_ASM:{line}")
                 continue
             if line.endswith(':'):
-                # Emit as a label
                 label_name = line[:-1]
                 self.emit(None, comment=f"RAW_ASM:{line}", label=label_name)
                 continue
-            # Normal instruction: emit as raw line
             self.emit(None, comment=f"RAW_ASM:{line}")
+
+        # ------------------------------------------------------------------
+        # 4. Release live marks and free all arg temporaries.
+        # ------------------------------------------------------------------
+        for reg in arg_regs:
+            ra.mark_register_consumed(reg)
+        ra.free_temporaries(*arg_regs)
 
         # asm() returns value in register 0
         return 0

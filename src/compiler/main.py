@@ -20,10 +20,12 @@ try:
     from .lexer import tokenize, LexerError
     from .parser import parse, ParseError
     from .assembly_generator import generate_assembly, CodeGenerationError
+    from .preprocessor import preprocess, PreprocessorError
 except ImportError:
     from compiler.lexer import tokenize, LexerError
     from compiler.parser import parse, ParseError  
     from compiler.assembly_generator import generate_assembly, CodeGenerationError
+    from compiler.preprocessor import preprocess, PreprocessorError
 
 
 def compile_file(input_path: Path, output_path: Optional[Path] = None, 
@@ -50,6 +52,18 @@ def compile_file(input_path: Path, output_path: Optional[Path] = None,
         
         if debug:
             print(f"Compiling: {input_path}")
+        
+        # Preprocessing
+        if debug:
+            print("Preprocessing...")
+        
+        source_code = preprocess(source_code, input_path.parent)
+        
+        if debug:
+            print("Preprocessed source:")
+            print("-" * 40)
+            print(source_code)
+            print("-" * 40)
         
         # Lexical analysis
         if debug:
@@ -100,6 +114,10 @@ def compile_file(input_path: Path, output_path: Optional[Path] = None,
         
         return True
         
+    except PreprocessorError as e:
+        print(f"Preprocessor Error: {e}", file=sys.stderr)
+        return False
+
     except LexerError as e:
         print(f"Lexer Error: {e}", file=sys.stderr)
         return False

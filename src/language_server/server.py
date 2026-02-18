@@ -57,12 +57,14 @@ try:
     from src.compiler.lexer import tokenize, LexerError, TokenType
     from src.compiler.parser import parse, ParseError
     from src.compiler.assembly_generator import generate_assembly, CodeGenerationError
+    from src.compiler.preprocessor import preprocess, PreprocessorError
 except ImportError:
     # Fallback for different import contexts
     try:
         from ..compiler.lexer import tokenize, LexerError, TokenType
         from ..compiler.parser import parse, ParseError
         from ..compiler.assembly_generator import generate_assembly, CodeGenerationError
+        from ..compiler.preprocessor import preprocess, PreprocessorError
     except ImportError:
         # Create stub implementations if compiler modules aren't available
         class LexerError(Exception):
@@ -72,6 +74,9 @@ except ImportError:
             pass
         
         class CodeGenerationError(Exception):
+            pass
+
+        class PreprocessorError(Exception):
             pass
         
         class TokenType:
@@ -85,6 +90,9 @@ except ImportError:
         
         def generate_assembly(ast):
             return ""
+
+        def preprocess(source, base_dir):
+            return source
 
 
 class MCLLanguageServer(LanguageServer):
@@ -128,6 +136,17 @@ class MCLLanguageServer(LanguageServer):
         
         self.types = {'int', 'char', 'void'}
         
+        # Preprocessor directives
+        self.preprocessor_directives = [
+            ('include',  '#include "file.mcl"',   'Splice another MCL file in-place at this point'),
+            ('define',   '#define NAME [value]',   'Define a macro flag or text substitution'),
+            ('undef',    '#undef NAME',             'Remove a previously defined macro'),
+            ('ifdef',    '#ifdef NAME',             'Emit the following block only if NAME is defined'),
+            ('ifndef',   '#ifndef NAME',            'Emit the following block only if NAME is NOT defined'),
+            ('else',     '#else',                   'Flip the current conditional block'),
+            ('endif',    '#endif',                  'Close an #ifdef / #ifndef block'),
+        ]
+        
         # Assembly instructions for completion
         self.assembly_instructions = {
             'LOAD', 'READ', 'MVR', 'MVM', 'ADD', 'SUB', 'MULT', 'DIV',
@@ -158,6 +177,19 @@ async def completion(params: CompletionParams) -> CompletionList:
     
     # Determine context and provide appropriate completions
     items = []
+    
+    # Preprocessor directives — triggered when line starts with '#'
+    stripped = current_line.lstrip()
+    if stripped.startswith('#'):
+        for name, signature, description in mcl_server.preprocessor_directives:
+            items.append(CompletionItem(
+                label=f"#{name}",
+                kind=CompletionItemKind.Keyword,
+                detail=signature,
+                documentation=description,
+                insert_text=f"#{name}",
+            ))
+        return CompletionList(is_incomplete=False, items=items)
     
     # Keywords
     for keyword in mcl_server.keywords:
@@ -232,6 +264,31 @@ async def hover(params: HoverParams) -> Optional[Hover]:
         return None
     
     word = line[word_start:word_end]
+    
+    # Check for preprocessor directive (word preceded by '#' on the same line)
+    pre_word = line[:word_start].rstrip()
+    if pre_word.endswith('#') or word.startswith('#'):
+        directive = word.lstrip('#')
+        directive_descriptions = {
+            'include': '**#include "path"**\n\nSplice another `.mcl` file in-place. Path is relative to the current file.\n\nExample: `#include "utils/math.mcl"`',
+            'define':  '**#define NAME [value]**\n\nDefine a macro flag or text-substitution macro.\n\n- Flag form: `#define DEBUG`\n- Value form: `#define SIZE 64`',
+            'undef':   '**#undef NAME**\n\nRemove a previously defined macro name.',
+            'ifdef':   '**#ifdef NAME**\n\nEmit the enclosed block only when `NAME` has been `#define`d.',
+            'ifndef':  '**#ifndef NAME**\n\nEmit the enclosed block only when `NAME` has **not** been `#define`d. Typical use: include guards.',
+            'else':    '**#else**\n\nAlternative branch for an open `#ifdef` / `#ifndef` block.',
+            'endif':   '**#endif**\n\nClose an open `#ifdef` / `#ifndef` block.',
+        }
+        if directive in directive_descriptions:
+            return Hover(
+                contents=MarkupContent(
+                    kind=MarkupKind.Markdown,
+                    value=directive_descriptions[directive]
+                ),
+                range=Range(
+                    start=Position(line=position.line, character=word_start),
+                    end=Position(line=position.line, character=word_end)
+                )
+            )
     
     # Provide hover information based on word
     hover_text = None
@@ -390,8 +447,42 @@ async def diagnostics(params: DocumentDiagnosticParams) -> FullDocumentDiagnosti
     diagnostic_items = []
     
     try:
+        # Run the preprocessor first (use a dummy base dir since we have no real path)
+        from pathlib import Path
+        import re
+        # Extract a plausible base dir from the URI (file:// scheme)
+        base_dir = Path('.')
+        if document_uri.startswith('file://'):
+            raw = document_uri[7:]
+            # On Windows URIs look like file:///C:/path/to/file.mcl
+            raw = raw.lstrip('/')
+            try:
+                base_dir = Path(raw).parent
+            except Exception:
+                pass
+        
+        try:
+            expanded_text = preprocess(text, base_dir)
+        except PreprocessorError as e:
+            # Extract line number from error message if available
+            m = re.search(r':(\d+):', str(e))
+            err_line = int(m.group(1)) - 1 if m else 0
+            diagnostic_items.append(Diagnostic(
+                range=Range(
+                    start=Position(line=err_line, character=0),
+                    end=Position(line=err_line, character=200)
+                ),
+                message=str(e),
+                severity=DiagnosticSeverity.Error,
+                source="mcl-preprocessor"
+            ))
+            return FullDocumentDiagnosticReport(kind="full", items=diagnostic_items)
+    except Exception:
+        expanded_text = text  # fall back to raw text on any unexpected error
+    
+    try:
         # Try to tokenize and parse
-        tokens = tokenize(text)
+        tokens = tokenize(expanded_text)
         
         try:
             ast = parse(tokens)
