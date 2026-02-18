@@ -7,30 +7,12 @@ The MCL language provides built-in GPU functions for graphics operations on a 32
 ## GPU Architecture
 
 ### Dual Buffer System
-- **Buffer 0** and **Buffer 1**: Two 32x32 pixel buffers
-- **Display Buffer Register**: Controls which buffer is shown on screen (bits 16-31 of GPU register)
-- **Edit Buffer Register**: Controls which buffer is currently being modified (bits 0-15 of GPU register)
-- **Row Storage**: Each row stored as 32-bit integer (MSB = leftmost pixel)
-- **GPU Control Register**: 32-bit register accessible via assembly as "GPU"
+- **Buffer 0** and **Buffer 1**: Two 32×32 pixel buffers
+- **Edit buffer**: the buffer currently being drawn to — controlled by `setGPUBuffer(0, id)`
+- **Display buffer**: the buffer currently shown on screen — controlled by `setGPUBuffer(1, id)`
+- **Row storage**: each row is a 32-bit integer; MSB = leftmost pixel (bit 31 = x=0, bit 0 = x=31)
 
-### GPU Register Control
-The GPU register provides direct control over buffer switching:
-```assembly
-// Switch edit buffer to buffer 1
-MVR R0, i:1
-MVR GPU, R0
-
-// Switch display buffer to buffer 1 (add 65536 = 1 << 16)
-MVR R0, i:65537    // 1 + (1 << 16) = edit buffer 1 + display buffer 1
-MVR GPU, R0
-
-// Read current GPU register state
-MVR R0, GPU
-```
-
-**Register Layout:**
-- Bits 0-15: Edit buffer selection (0 = buffer 0, 1 = buffer 1)
-- Bits 16-31: Display buffer selection (0 = buffer 0, 1 = buffer 1)
+Buffer selection is managed exclusively through the `setGPUBuffer()` and `getGPUBuffer()` built-in functions. There is no general-purpose assembly register for buffer control.
 
 ### Pixel Operations
 All drawing operations use bitwise OR, meaning:
@@ -91,7 +73,21 @@ Renders a loaded text character using 5x5 font.
 - **Text System**: 5x5 font with 14-bit addressing (16384 characters max)
 - **Example**: `drawText(0, 5, 5);` // Draw character at (5,5)
 
-### Buffer Operations
+### Buffer Control
+
+#### `setGPUBuffer(buffer_id: int, value: int)`
+Sets one of the two GPU buffer selectors.
+- `buffer_id = 0` — sets the **edit buffer** (which buffer drawing commands write to)
+- `buffer_id = 1` — sets the **display buffer** (which buffer is shown on screen)
+- `value` — buffer index: `0` = buffer 0, `1` = buffer 1
+- **Example**: `setGPUBuffer(0, 1);` // draw to buffer 1
+- **Example**: `setGPUBuffer(1, 0);` // display buffer 0
+
+#### `getGPUBuffer(buffer_id: int) -> int`
+Reads the current buffer selector.
+- `buffer_id = 0` — returns the current **edit buffer** index
+- `buffer_id = 1` — returns the current **display buffer** index
+- **Example**: `var eb: int = getGPUBuffer(0);`
 
 #### `scrollBuffer(offx: int, offy: int)`
 Scrolls the edit buffer by the specified offsets.
@@ -158,32 +154,22 @@ function showMessage() -> void {
 ```
 
 ### Dual Buffer Animation
-```assembly
-// Assembly example for smooth animation using GPU register
-animate_loop:
-    // Clear and draw on buffer 0
-    MVR R0, i:0
-    MVR GPU, R0          // Set edit buffer to 0
-    
-    CLRGRID i:0, i:0, i:32, i:32
-    DRGRD i:10, i:10, i:5, i:5
-    
-    // Display buffer 0
-    MVR R0, i:65536      // 1 << 16 = display buffer 0
-    MVR GPU, R0
-    
-    // Wait and switch to buffer 1
-    MVR R0, i:1
-    MVR GPU, R0          // Set edit buffer to 1
-    
-    CLRGRID i:0, i:0, i:32, i:32
-    DRGRD i:15, i:15, i:5, i:5
-    
-    // Display buffer 1  
-    MVR R0, i:65537      // 1 + (1 << 16) = edit buffer 1 + display buffer 1
-    MVR GPU, R0
-    
-    JMP animate_loop
+```mcl
+function animate() {
+    while (1) {
+        // Draw frame A on buffer 0, display buffer 1
+        setGPUBuffer(0, 0);           // edit → buffer 0
+        clearGrid(0, 0, 32, 32);
+        fillGrid(10, 10, 5, 5);
+        setGPUBuffer(1, 1);           // display → buffer 1 (previously drawn)
+
+        // Draw frame B on buffer 1, display buffer 0
+        setGPUBuffer(0, 1);           // edit → buffer 1
+        clearGrid(0, 0, 32, 32);
+        fillGrid(15, 15, 5, 5);
+        setGPUBuffer(1, 0);           // display → buffer 0
+    }
+}
 ```
 
 ## Technical Details
